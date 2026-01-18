@@ -34,8 +34,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
       );
     }
 
-    return ChangeNotifierProvider(
-      create: (_) => ScheduleProvider(),
+    // All roles need both ScheduleProvider and AdminProvider for booking functionality
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => ScheduleProvider()),
+        ChangeNotifierProvider(create: (_) => AdminProvider()),
+      ],
       child: LayoutShell(
         selectedIndex: _selectedIndex,
         onIndexChanged: (index) => setState(() => _selectedIndex = index),
@@ -60,6 +64,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
           label: 'الاستقبال (اليوم)',
         ),
         NavigationDestination(
+          icon: Icon(Icons.people_outline),
+          selectedIcon: Icon(Icons.people),
+          label: 'سجل المرضى',
+        ),
+        NavigationDestination(
           icon: Icon(Icons.settings_outlined),
           selectedIcon: Icon(Icons.settings),
           label: 'الإعدادات',
@@ -70,12 +79,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         NavigationDestination(
           icon: Icon(Icons.dashboard_outlined),
           selectedIcon: Icon(Icons.dashboard),
-          label: 'الرئيسية',
-        ),
-         NavigationDestination(
-          icon: Icon(Icons.calendar_month_outlined),
-          selectedIcon: Icon(Icons.calendar_month),
-          label: 'قائمة الانتظار', 
+          label: 'قائمة الانتظار',
         ),
          NavigationDestination(
           icon: Icon(Icons.people_outline),
@@ -121,27 +125,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
     if (role == 'admin') {
       return const AdminLayoutShell(); // 9-Module Admin Panel
     } else if (role == 'reception') {
-      // RECEPTION MENU: [0: ReceptionDashboard, 1: Settings]
+      // RECEPTION MENU: [0: ReceptionDashboard, 1: Patients, 2: Settings]
       switch (_selectedIndex) {
         case 0: return const ReceptionDashboard();
-        case 1: return const SettingsScreen();
+        case 1: return PatientsScreen(userRole: widget.userRole);
+        case 2: return const SettingsScreen();
         default: return const Center(child: Text("غير موجود"));
       }
     } else if (role == 'doctor') {
-      // DOCTOR MENU: [0:Home, 1:Queue, 2:Patients, 3:Settings]
+      // DOCTOR MENU: [0:Queue (main), 1:Patients, 2:Settings]
       switch (_selectedIndex) {
-        case 0: return Center(child: Text("الرئيسية - ${widget.userRole}"));
-        case 1: return const DoctorDashboard();
-        case 2: return const PatientsScreen();
-        case 3: return const SettingsScreen();
+        case 0: return const DoctorDashboard();
+        case 1: return PatientsScreen(userRole: widget.userRole);
+        case 2: return const SettingsScreen();
         default: return const Center(child: Text("غير موجود"));
       }
     } else {
       // CALL CENTER MENU: [0:Timeline, 1:Patients, 2:FollowUp, 3:Settings]
       switch (_selectedIndex) {
-        case 0: return const TimelineView();
-        case 1: return const PatientsScreen();
-        case 2: return const FollowUpScreen();
+        case 0: return TimelineView(userRole: widget.userRole);
+        case 1: return PatientsScreen(userRole: widget.userRole);
+        case 2: return FollowUpScreen(userRole: widget.userRole);
         case 3: return const SettingsScreen();
         default: return const Center(child: Text("غير موجود"));
       }

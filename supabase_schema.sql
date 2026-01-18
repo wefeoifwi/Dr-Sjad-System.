@@ -90,6 +90,9 @@ CREATE TABLE IF NOT EXISTS public.sessions (
     device_id UUID REFERENCES public.devices(id) ON DELETE SET NULL,
     start_time TIMESTAMPTZ NOT NULL,
     end_time TIMESTAMPTZ,
+    -- NEW: Actual session timing (for duration tracking)
+    session_start_time TIMESTAMPTZ, -- When patient actually entered doctor's room
+    session_end_time TIMESTAMPTZ,   -- When session actually ended
     service_type TEXT,
     status TEXT DEFAULT 'scheduled', -- 'scheduled', 'booked', 'arrived', 'in_session', 'completed', 'cancelled', 'no_show', 'cancellation_pending'
     price NUMERIC DEFAULT 0,
@@ -262,4 +265,52 @@ INSERT INTO public.patients (name, phone, age, gender, source, skin_type, medica
     ('ريم سعد', '0552345678', 31, 'female', 'social_media', 'III', NULL)
 ON CONFLICT DO NOTHING;
 
-SELECT 'CarePoint Enhanced Database Schema created successfully! (v2.0)' as result;
+-- ============================================
+-- 9. NEW: Notifications Table
+-- ============================================
+CREATE TABLE IF NOT EXISTS public.notifications (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE NOT NULL,
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    type TEXT DEFAULT 'general', -- new_booking, patient_arrived, session_started, cancellation_request, cancellation_approved, cancellation_rejected, follow_up_reminder
+    reference_id UUID, -- ID of related record (follow_up, session, etc.)
+    is_read BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON public.notifications(user_id, is_read);
+
+-- ============================================
+-- 10. NEW: Follow-ups Table
+-- ============================================
+CREATE TABLE IF NOT EXISTS public.follow_ups (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID REFERENCES public.patients(id) ON DELETE CASCADE NOT NULL,
+    doctor_id UUID REFERENCES public.profiles(id),
+    scheduled_date DATE NOT NULL,
+    scheduled_time TIME,
+    status TEXT DEFAULT 'pending', -- pending, confirmed, postponed, pending_cancellation, cancelled, completed
+    reminder_sent BOOLEAN DEFAULT FALSE,
+    cancellation_reason TEXT,
+    cancellation_approved BOOLEAN,
+    created_by UUID REFERENCES public.profiles(id),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_follow_ups_status ON public.follow_ups(status, scheduled_date);
+
+-- ============================================
+-- 11. NEW: Activity Logs Table
+-- ============================================
+CREATE TABLE IF NOT EXISTS public.activity_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID REFERENCES public.profiles(id),
+    action TEXT NOT NULL,
+    details TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+SELECT 'CarePoint Enhanced Database Schema created successfully! (v3.0 - with Notifications & Follow-ups)' as result;
+

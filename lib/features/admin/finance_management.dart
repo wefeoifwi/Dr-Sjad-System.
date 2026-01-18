@@ -108,7 +108,7 @@ class _FinanceManagementScreenState extends State<FinanceManagementScreen> {
                     child: ListView.separated(
                       padding: const EdgeInsets.all(8),
                       itemCount: provider.recentTransactions.length,
-                      separatorBuilder: (_, __) => const Divider(color: Colors.white10),
+                      separatorBuilder: (_, i) => const Divider(color: Colors.white10),
                       itemBuilder: (context, index) {
                         final transaction = provider.recentTransactions[index];
                         final date = DateTime.parse(transaction['end_time'] ?? transaction['start_time']);

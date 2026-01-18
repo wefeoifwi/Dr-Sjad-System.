@@ -18,6 +18,26 @@ class AppTheme {
   // Helpers
   static ImageFilter get glassBlur => ImageFilter.blur(sigmaX: 10, sigmaY: 10);
 
+  /// تحويل الوقت إلى نظام 12 ساعة مع AM/PM
+  static String formatTime12h(DateTime time, {bool showMinutes = true}) {
+    final hour = time.hour;
+    final minute = time.minute;
+    final period = hour >= 12 ? 'م' : 'ص'; // مساءً / صباحاً
+    final hour12 = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
+    
+    if (showMinutes) {
+      return '$hour12:${minute.toString().padLeft(2, '0')} $period';
+    }
+    return '$hour12 $period';
+  }
+
+  /// تحويل الساعة فقط إلى نظام 12 ساعة
+  static String formatHour12h(int hour) {
+    final period = hour >= 12 ? 'م' : 'ص';
+    final hour12 = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
+    return '$hour12 $period';
+  }
+
   static ThemeData get darkTheme {
     return ThemeData.dark().copyWith(
       scaffoldBackgroundColor: background,
@@ -75,3 +95,4 @@ class AppTheme {
     );
   }
 }
+

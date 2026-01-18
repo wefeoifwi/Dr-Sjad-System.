@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/theme.dart';
+import '../../core/realtime_service.dart';
 import '../dashboard/dashboard_screen.dart';
+import '../notifications/notifications_provider.dart';
+import '../schedule/schedule_provider.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -47,6 +51,24 @@ class _LoginScreenState extends State<LoginScreen> {
       }
 
       final role = response['role'] ?? 'employee';
+      final userId = response['id'];
+      
+      // تهيئة RealtimeService المركزي
+      if (userId != null) {
+        debugPrint('🔌 تهيئة RealtimeService للمستخدم: $userId');
+        RealtimeService().initialize(userId);
+      }
+      
+      // Set current user for notifications
+      if (mounted && userId != null) {
+        context.read<NotificationsProvider>().setCurrentUser(userId);
+      }
+      
+      // بدء الاستماع للتحديثات اللحظية
+      if (mounted) {
+        debugPrint('🚀 بدء التحديث اللحظي بعد تسجيل الدخول...');
+        context.read<ScheduleProvider>().subscribeToRealtimeUpdates();
+      }
       
       if (mounted) {
         Navigator.of(context).pushReplacement(
@@ -224,33 +246,5 @@ class _LoginScreenState extends State<LoginScreen> {
     _usernameController.dispose();
     _passwordController.dispose();
     super.dispose();
-  }
-}
-
-class _DebugButton extends StatelessWidget {
-  final String label;
-  final Color color;
-  final VoidCallback onTap;
-
-  const _DebugButton({required this.label, required this.color, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: color.withAlpha(51),
-          border: Border.all(color: color.withAlpha(128)),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 12),
-        ),
-      ),
-    );
   }
 }

@@ -22,7 +22,7 @@ class BookingManagementScreen extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             const Expanded(
-              child: TimelineView(),
+              child: TimelineView(userRole: 'admin'),
             ),
           ],
         ),

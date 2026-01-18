@@ -130,7 +130,7 @@ class AdminDashboardOverview extends StatelessWidget {
                       ),
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(16),
-                        child: const TimelineView(),
+                        child: const TimelineView(userRole: 'admin'),
                       ),
                     ),
                   ),
@@ -149,7 +149,7 @@ class AdminDashboardOverview extends StatelessWidget {
                       ),
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(16),
-                        child: const TimelineView(),
+                        child: const TimelineView(userRole: 'admin'),
                       ),
                     ),
                   const SizedBox(height: 24),
@@ -340,63 +340,6 @@ class _RevenueChartSection extends StatelessWidget {
           borderRadius: BorderRadius.circular(4),
         ),
       ],
-    );
-  }
-}
-
-class _RecentSessionsSection extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: 400,
-      padding: const EdgeInsets.all(24),
-      decoration: BoxDecoration(
-        color: AppTheme.surface,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: Colors.white10),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-           Row(
-            children: [
-               const Icon(Icons.live_tv, color: Colors.redAccent, size: 20),
-               const SizedBox(width: 8),
-               const Text('جلسات قادمة الآن', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.white)),
-               const Spacer(),
-               Container(
-                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                 decoration: BoxDecoration(color: Colors.redAccent.withAlpha(51), borderRadius: BorderRadius.circular(4)),
-                 child: const Text('Live', style: TextStyle(color: Colors.redAccent, fontSize: 10, fontWeight: FontWeight.bold)),
-               ),
-            ],
-          ),
-          const SizedBox(height: 20),
-          Expanded(
-            child: ListView.separated(
-              itemCount: 8,
-              separatorBuilder: (_, __) => const Divider(color: Colors.white10),
-              itemBuilder: (context, index) => ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: CircleAvatar(
-                  backgroundColor: AppTheme.primary.withAlpha(26),
-                  child: Icon(Icons.person, color: AppTheme.primary, size: 16),
-                ),
-                title: Text('مريض افتراضي ${index+1}', style: const TextStyle(fontSize: 13, color: Colors.white)),
-                subtitle: const Text('ليزر - جلسة كاملة', style: TextStyle(fontSize: 11, color: Colors.white54)),
-                trailing: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: const [
-                    Text('10:30 ص', style: TextStyle(fontSize: 12, color: Colors.white70)),
-                    Text('في الانتظار', style: TextStyle(fontSize: 10, color: Colors.orange)),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
     );
   }
 }

@@ -40,17 +40,21 @@ class _AssetsManagementScreenState extends State<AssetsManagementScreen> with Si
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // Header
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            Wrap(
+              spacing: 16,
+              runSpacing: 12,
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                Text('إدارة الأصول والخدمات', style: Theme.of(context).textTheme.headlineMedium),
+                Text('إدارة الأصول', style: Theme.of(context).textTheme.titleLarge),
                 ElevatedButton.icon(
                   onPressed: () => _showAddDialog(),
-                  icon: const Icon(Icons.add),
-                  label: Text(_getButtonLabel()),
+                  icon: const Icon(Icons.add, size: 18),
+                  label: Text(_getButtonLabel(), style: const TextStyle(fontSize: 12)),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppTheme.primary,
                     foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   ),
                 ),
               ],
@@ -105,12 +109,32 @@ class _AssetsManagementScreenState extends State<AssetsManagementScreen> with Si
   }
 
   void _showAddDialog() {
+    final adminProvider = context.read<AdminProvider>();
+    
     if (_tabController.index == 0) {
-      showDialog(context: context, builder: (_) => const _AddDeviceDialog());
+      showDialog(
+        context: context,
+        builder: (_) => ChangeNotifierProvider.value(
+          value: adminProvider,
+          child: const _AddDeviceDialog(),
+        ),
+      );
     } else if (_tabController.index == 1) {
-      showDialog(context: context, builder: (_) => const _AddServiceDialog());
+      showDialog(
+        context: context,
+        builder: (_) => ChangeNotifierProvider.value(
+          value: adminProvider,
+          child: const _AddServiceDialog(),
+        ),
+      );
     } else {
-      showDialog(context: context, builder: (_) => const _AddDepartmentDialog());
+      showDialog(
+        context: context,
+        builder: (_) => ChangeNotifierProvider.value(
+          value: adminProvider,
+          child: const _AddDepartmentDialog(),
+        ),
+      );
     }
   }
 }
@@ -127,7 +151,7 @@ class _DevicesList extends StatelessWidget {
         }
         return ListView.separated(
           itemCount: provider.devices.length,
-          separatorBuilder: (_, __) => const SizedBox(height: 12),
+          separatorBuilder: (_, i) => const SizedBox(height: 12),
           itemBuilder: (context, index) {
             final device = provider.devices[index];
             return Container(
@@ -147,9 +171,18 @@ class _DevicesList extends StatelessWidget {
                 ),
                 title: Text(device['name'] ?? 'بدون اسم', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
                 subtitle: Text('${device['type'] ?? 'عام'} - ${device['status'] ?? 'نشط'}', style: const TextStyle(color: Colors.white70)),
-                trailing: IconButton(
-                  icon: const Icon(Icons.delete, color: Colors.redAccent),
-                  onPressed: () => _confirmDelete(context, device['id'], true),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.edit, color: Colors.blueAccent),
+                      onPressed: () => _showEditDeviceDialog(context, device),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete, color: Colors.redAccent),
+                      onPressed: () => _confirmDelete(context, device['id'], device['name']),
+                    ),
+                  ],
                 ),
               ),
             );
@@ -159,17 +192,55 @@ class _DevicesList extends StatelessWidget {
     );
   }
 
-  void _confirmDelete(BuildContext context, String id, bool isDevice) {
+  void _showEditDeviceDialog(BuildContext context, Map<String, dynamic> device) {
+    final nameController = TextEditingController(text: device['name']);
+    final typeController = TextEditingController(text: device['type'] ?? '');
+    
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('تعديل الجهاز'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(controller: nameController, decoration: const InputDecoration(labelText: 'اسم الجهاز', border: OutlineInputBorder())),
+            const SizedBox(height: 16),
+            TextField(controller: typeController, decoration: const InputDecoration(labelText: 'النوع', border: OutlineInputBorder())),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
+          ElevatedButton(
+            onPressed: () async {
+              try {
+                await context.read<AdminProvider>().updateDevice(
+                  device['id'],
+                  name: nameController.text,
+                  type: typeController.text,
+                );
+                if (ctx.mounted) Navigator.pop(ctx);
+              } catch (e) {
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('خطأ: $e'), backgroundColor: Colors.red));
+              }
+            },
+            child: const Text('حفظ'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _confirmDelete(BuildContext context, String id, String? name) {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('تأكيد الحذف'),
-        content: const Text('هل أنت متأكد من الحذف؟'),
+        content: Text('هل أنت متأكد من حذف الجهاز "${name ?? ''}"؟'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
           TextButton(
             onPressed: () {
-               context.read<AdminProvider>().deleteDevice(id); // TODO: Implement delete
+               context.read<AdminProvider>().deleteDevice(id);
                Navigator.pop(ctx);
             },
             child: const Text('حذف', style: TextStyle(color: Colors.red)),
@@ -190,9 +261,9 @@ class _ServicesList extends StatelessWidget {
         if (provider.services.isEmpty) {
           return const Center(child: Text('لا يوجد خدمات مضافة', style: TextStyle(color: Colors.white54)));
         }
-        return ListView.separated(
+         return ListView.separated(
           itemCount: provider.services.length,
-          separatorBuilder: (_, __) => const SizedBox(height: 12),
+          separatorBuilder: (_, i) => const SizedBox(height: 12),
           itemBuilder: (context, index) {
             final service = provider.services[index];
             return Container(
@@ -211,18 +282,83 @@ class _ServicesList extends StatelessWidget {
                   child: const Icon(Icons.spa, color: Colors.purpleAccent),
                 ),
                 title: Text(service['name'] ?? 'بدون اسم', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                subtitle: Text('${service['category'] ?? ''} - ${service['default_price']} د.ع', style: const TextStyle(color: Colors.white70)),
-                trailing: IconButton(
-                  icon: const Icon(Icons.delete, color: Colors.redAccent),
-                  onPressed: () {
-                     // TODO delete service
-                  },
+                subtitle: Text('${service['default_price']} د.ع', style: const TextStyle(color: Colors.white70)),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.edit, color: Colors.blueAccent),
+                      onPressed: () => _showEditServiceDialog(context, service),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete, color: Colors.redAccent),
+                      onPressed: () => _confirmDeleteService(context, service['id'], service['name']),
+                    ),
+                  ],
                 ),
               ),
             );
           },
         );
       },
+    );
+  }
+
+  void _showEditServiceDialog(BuildContext context, Map<String, dynamic> service) {
+    final nameController = TextEditingController(text: service['name']);
+    final priceController = TextEditingController(text: service['default_price']?.toString() ?? '0');
+    
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('تعديل الخدمة'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(controller: nameController, decoration: const InputDecoration(labelText: 'اسم الخدمة', border: OutlineInputBorder())),
+            const SizedBox(height: 16),
+            TextField(controller: priceController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'السعر (د.ع)', border: OutlineInputBorder())),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
+          ElevatedButton(
+            onPressed: () async {
+              try {
+                await context.read<AdminProvider>().updateService(
+                  service['id'],
+                  name: nameController.text,
+                  price: double.tryParse(priceController.text) ?? 0,
+                );
+                if (ctx.mounted) Navigator.pop(ctx);
+              } catch (e) {
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('خطأ: $e'), backgroundColor: Colors.red));
+              }
+            },
+            child: const Text('حفظ'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _confirmDeleteService(BuildContext context, String id, String? name) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('تأكيد الحذف'),
+        content: Text('هل أنت متأكد من حذف الخدمة "${name ?? ''}"؟'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
+          TextButton(
+            onPressed: () {
+              context.read<AdminProvider>().deleteService(id);
+              Navigator.pop(ctx);
+            },
+            child: const Text('حذف', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -275,7 +411,11 @@ class _AddDeviceDialogState extends State<_AddDeviceDialog> {
                 );
                 if (mounted) Navigator.pop(context);
               } catch (e) {
-                 // handle error
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('خطأ: $e'), backgroundColor: Colors.red),
+                  );
+                }
               } finally {
                 if (mounted) setState(() => _isLoading = false);
               }
@@ -337,7 +477,11 @@ class _AddServiceDialogState extends State<_AddServiceDialog> {
                 );
                 if (mounted) Navigator.pop(context);
               } catch (e) {
-                 // handle error
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('خطأ: $e'), backgroundColor: Colors.red),
+                  );
+                }
               } finally {
                 if (mounted) setState(() => _isLoading = false);
               }
@@ -362,7 +506,7 @@ class _DepartmentsList extends StatelessWidget {
         }
         return ListView.separated(
           itemCount: provider.departments.length,
-          separatorBuilder: (_, __) => const SizedBox(height: 12),
+          separatorBuilder: (_, i) => const SizedBox(height: 12),
           itemBuilder: (context, index) {
             final dept = provider.departments[index];
             return Container(
@@ -381,33 +525,73 @@ class _DepartmentsList extends StatelessWidget {
                   child: const Icon(Icons.category, color: Colors.blueAccent),
                 ),
                 title: Text(dept['name'] ?? 'بدون اسم', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                trailing: IconButton(
-                  icon: const Icon(Icons.delete, color: Colors.redAccent),
-                  onPressed: () {
-                     showDialog(
-                        context: context,
-                        builder: (ctx) => AlertDialog(
-                          title: const Text('تأكيد الحذف'),
-                          content: const Text('هل أنت متأكد من حذف هذا القسم؟'),
-                          actions: [
-                            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
-                            TextButton(
-                              onPressed: () {
-                                context.read<AdminProvider>().deleteDepartment(dept['id']);
-                                Navigator.pop(ctx);
-                              },
-                              child: const Text('حذف', style: TextStyle(color: Colors.red)),
-                            ),
-                          ],
-                        ),
-                      );
-                  },
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.edit, color: Colors.blueAccent),
+                      onPressed: () => _showEditDepartmentDialog(context, dept),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete, color: Colors.redAccent),
+                      onPressed: () => _confirmDeleteDepartment(context, dept['id'], dept['name']),
+                    ),
+                  ],
                 ),
               ),
             );
           },
         );
       },
+    );
+  }
+
+  void _showEditDepartmentDialog(BuildContext context, Map<String, dynamic> dept) {
+    final nameController = TextEditingController(text: dept['name']);
+    
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('تعديل القسم'),
+        content: TextField(
+          controller: nameController, 
+          decoration: const InputDecoration(labelText: 'اسم القسم', border: OutlineInputBorder()),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
+          ElevatedButton(
+            onPressed: () async {
+              try {
+                await context.read<AdminProvider>().updateDepartment(dept['id'], name: nameController.text);
+                if (ctx.mounted) Navigator.pop(ctx);
+              } catch (e) {
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('خطأ: $e'), backgroundColor: Colors.red));
+              }
+            },
+            child: const Text('حفظ'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _confirmDeleteDepartment(BuildContext context, String id, String? name) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('تأكيد الحذف'),
+        content: Text('هل أنت متأكد من حذف القسم "${name ?? ''}"؟'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
+          TextButton(
+            onPressed: () {
+              context.read<AdminProvider>().deleteDepartment(id);
+              Navigator.pop(ctx);
+            },
+            child: const Text('حذف', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -451,7 +635,11 @@ class _AddDepartmentDialogState extends State<_AddDepartmentDialog> {
                 await context.read<AdminProvider>().addDepartment(_nameController.text);
                 if (mounted) Navigator.pop(context);
               } catch (e) {
-                 // handle error
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('خطأ: $e'), backgroundColor: Colors.red),
+                  );
+                }
               } finally {
                 if (mounted) setState(() => _isLoading = false);
               }

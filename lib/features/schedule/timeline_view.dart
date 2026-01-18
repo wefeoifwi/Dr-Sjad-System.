@@ -1,13 +1,17 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import '../../core/theme.dart';
+import '../admin/admin_provider.dart';
 import 'schedule_provider.dart';
 import 'models.dart';
 import 'booking_dialog.dart';
 
 class TimelineView extends StatefulWidget {
-  const TimelineView({super.key});
+  final String userRole; // 'admin', 'reception', 'call_center'
+  
+  const TimelineView({super.key, this.userRole = 'admin'});
 
   @override
   State<TimelineView> createState() => _TimelineViewState();
@@ -15,9 +19,12 @@ class TimelineView extends StatefulWidget {
 
 class _TimelineViewState extends State<TimelineView> {
   double _baseHourHeight = 100.0;
-  
-  // Shared scroll controller for synchronized scrolling
+  final ScrollController _horizontalScrollController = ScrollController();
   final ScrollController _verticalScrollController = ScrollController();
+  
+  // Timer للتحديث اللحظي
+  Timer? _refreshTimer;
+  int _lastBookingCount = 0;
 
   @override
   void initState() {
@@ -25,11 +32,24 @@ class _TimelineViewState extends State<TimelineView> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<ScheduleProvider>().loadData();
     });
+    
+    // Timer للتحديث اللحظي
+    _refreshTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) {
+        final provider = context.read<ScheduleProvider>();
+        if (provider.bookings.length != _lastBookingCount) {
+          _lastBookingCount = provider.bookings.length;
+          setState(() {});
+        }
+      }
+    });
   }
 
   @override
   void dispose() {
+    _horizontalScrollController.dispose();
     _verticalScrollController.dispose();
+    _refreshTimer?.cancel();
     super.dispose();
   }
 
@@ -41,32 +61,56 @@ class _TimelineViewState extends State<TimelineView> {
       return const Center(child: CircularProgressIndicator());
     }
 
+    final departments = provider.departmentObjects;
+    final bookings = provider.bookings;
+    
+    // ساعات العمل من 10 صباحاً إلى 12 مساءً (14 ساعة)
+    final hours = List.generate(14, (i) => 10 + i);
+
     return GestureDetector(
       onScaleStart: (details) {
         _baseHourHeight = provider.hourHeight;
       },
       onScaleUpdate: (details) {
-        if (details.pointerCount == 2) { 
-           // Calculate new height based on scale
-           final newHeight = _baseHourHeight * details.verticalScale;
-           provider.setZoom(newHeight);
+        if (details.pointerCount == 2) {
+          final newHeight = _baseHourHeight * details.verticalScale;
+          provider.setZoom(newHeight);
         }
       },
       child: Column(
         children: [
-          _buildHeader(provider),
+          // شريط التحكم العلوي
+          _buildControlBar(provider),
+          
+          // الجدول الرئيسي
           Expanded(
-            child: SingleChildScrollView(
-              controller: _verticalScrollController,
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildTimeColumn(provider),
-                  ...provider.doctors.map((doctor) => 
-                    _buildDoctorColumn(doctor, provider.bookings, provider)
+            child: Row(
+              children: [
+                // عمود أسماء الأقسام (ثابت)
+                _buildDepartmentsColumn(departments, provider.hourHeight),
+                
+                // الجدول مع الأوقات
+                Expanded(
+                  child: Column(
+                    children: [
+                      // صف الأوقات (ثابت)
+                      _buildTimeHeader(hours, provider.hourHeight),
+                      
+                      // خلايا الحجوزات
+                      Expanded(
+                        child: SingleChildScrollView(
+                          controller: _verticalScrollController,
+                          child: SingleChildScrollView(
+                            controller: _horizontalScrollController,
+                            scrollDirection: Axis.horizontal,
+                            child: _buildGrid(departments, hours, bookings, provider.hourHeight),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ],
@@ -74,74 +118,93 @@ class _TimelineViewState extends State<TimelineView> {
     );
   }
 
-  Widget _buildHeader(ScheduleProvider provider) {
+  // شريط التحكم العلوي
+  Widget _buildControlBar(ScheduleProvider provider) {
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       color: AppTheme.surface,
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
         child: Row(
           children: [
+            // اختيار القسم
             SizedBox(
-              width: 180,
-              child: DropdownButtonFormField<String>(initialValue: provider.selectedDepartmentId,
+              width: 150,
+              child: DropdownButtonFormField<String>(
+                value: provider.selectedDepartmentId,
                 decoration: const InputDecoration(
                   labelText: 'القسم',
-                  contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   isDense: true,
                 ),
                 items: provider.departments.entries.map((e) {
-                  return DropdownMenuItem(value: e.key, child: Text(e.value));
+                  return DropdownMenuItem(value: e.key, child: Text(e.value, style: const TextStyle(fontSize: 12)));
                 }).toList(),
                 onChanged: (val) => provider.setDepartment(val!),
               ),
             ),
-            const SizedBox(width: 16),
-            Row(
-              children: [
-                IconButton(
-                  icon: const Icon(Icons.zoom_out, size: 28),
-                  onPressed: () => provider.setZoom(provider.hourHeight - 20),
-                  tooltip: 'تصغير الجدول',
-                ),
-                SizedBox(
-                  width: 150,
-                  child: SliderTheme(
-                    data: SliderTheme.of(context).copyWith(
-                      trackHeight: 6,
-                      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 8),
-                    ),
-                    child: Slider(
-                      value: provider.hourHeight,
-                      min: 30.0,
-                      max: 300.0,
-                      onChanged: (val) => provider.setZoom(val),
-                    ),
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.zoom_in, size: 28),
-                  onPressed: () => provider.setZoom(provider.hourHeight + 20),
-                  tooltip: 'تكبير الجدول',
-                ),
-              ],
+            const SizedBox(width: 12),
+            
+            // أزرار التكبير والتصغير
+            IconButton(
+              icon: const Icon(Icons.zoom_out, size: 20),
+              onPressed: () => provider.setZoom(provider.hourHeight - 20),
+              tooltip: 'تصغير',
             ),
-            const SizedBox(width: 32),
-            Row(
-              children: [
-                IconButton(
-                  icon: const Icon(Icons.arrow_back_ios),
-                  onPressed: () => provider.changeDate(provider.selectedDate.subtract(const Duration(days: 1))),
+            SizedBox(
+              width: 100,
+              child: Slider(
+                value: provider.hourHeight,
+                min: 30.0,
+                max: 300.0,
+                onChanged: (val) => provider.setZoom(val),
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.zoom_in, size: 20),
+              onPressed: () => provider.setZoom(provider.hourHeight + 20),
+              tooltip: 'تكبير',
+            ),
+            const SizedBox(width: 12),
+            
+            // التنقل بين التواريخ
+            IconButton(
+              icon: const Icon(Icons.chevron_right, size: 24),
+              onPressed: () => provider.changeDate(provider.selectedDate.subtract(const Duration(days: 1))),
+            ),
+            InkWell(
+              onTap: () async {
+                final date = await showDatePicker(
+                  context: context,
+                  initialDate: provider.selectedDate,
+                  firstDate: DateTime.now().subtract(const Duration(days: 365)),
+                  lastDate: DateTime.now().add(const Duration(days: 365)),
+                );
+                if (date != null) provider.changeDate(date);
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.white10,
+                  borderRadius: BorderRadius.circular(8),
                 ),
-                Text(
-                  DateFormat('EEEE, d MMMM', 'ar').format(provider.selectedDate),
-                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                child: Text(
+                  DateFormat('d/M/yyyy', 'ar').format(provider.selectedDate),
+                  style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.arrow_forward_ios),
-                  onPressed: () => provider.changeDate(provider.selectedDate.add(const Duration(days: 1))),
-                ),
-              ],
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.chevron_left, size: 24),
+              onPressed: () => provider.changeDate(provider.selectedDate.add(const Duration(days: 1))),
+            ),
+            const SizedBox(width: 8),
+            
+            // زر التحديث
+            IconButton(
+              icon: const Icon(Icons.refresh, size: 20),
+              onPressed: () => provider.loadData(),
+              tooltip: 'تحديث',
             ),
           ],
         ),
@@ -149,168 +212,223 @@ class _TimelineViewState extends State<TimelineView> {
     );
   }
 
-  Widget _buildTimeColumn(ScheduleProvider provider) {
-    return SizedBox(
-      width: 60,
-      child: Column(
-        children: [
-          const SizedBox(height: 50), // Header offset
-          ...List.generate(14, (index) {
-            final hour = 10 + index;
-            return SizedBox(
-              height: provider.hourHeight,
-              child: Text(
-                '$hour:00',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.white.withAlpha(128)),
-              ),
-            );
-          }),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDoctorColumn(Doctor doctor, List<Booking> bookings, ScheduleProvider provider) {
-    final doctorBookings = bookings.where((b) => b.doctorId == doctor.id).toList();
-
+  // عمود أسماء الأقسام على الجانب
+  Widget _buildDepartmentsColumn(List<Department> departments, double cellHeight) {
     return Container(
-      width: 200, 
-      margin: const EdgeInsets.symmetric(horizontal: 2),
-      decoration: BoxDecoration(
-        border: Border(right: BorderSide(color: Colors.white.withAlpha(26))),
-      ),
+      width: 120,
+      color: AppTheme.surface,
       child: Column(
         children: [
+          // خلية فارغة للمحاذاة مع صف الأوقات
           Container(
             height: 50,
-            padding: const EdgeInsets.all(12),
-            color: doctor.color.withAlpha(51),
-            child: Row(
-              children: [
-                 CircleAvatar(
-                   radius: 16, 
-                   backgroundColor: doctor.color,
-                   child: Text(doctor.name[0], style: const TextStyle(color: Colors.white)),
-                 ),
-                 const SizedBox(width: 8),
-                 Expanded(
-                   child: Text(
-                     doctor.name,
-                     style: const TextStyle(fontWeight: FontWeight.bold),
-                     overflow: TextOverflow.ellipsis,
-                   ),
-                 ),
-              ],
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              border: Border(bottom: BorderSide(color: Colors.white.withAlpha(26))),
+            ),
+            child: const Text('القسم', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+          ),
+          
+          // أسماء الأقسام
+          Expanded(
+            child: SingleChildScrollView(
+              // لا نستخدم controller هنا لتجنب خطأ multiple ScrollPosition
+              child: Column(
+                children: departments.map((dept) {
+                  return Container(
+                    height: cellHeight,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    decoration: BoxDecoration(
+                      color: dept.color.withAlpha(26),
+                      border: Border(bottom: BorderSide(color: Colors.white.withAlpha(13))),
+                    ),
+                    child: Row(
+                      children: [
+                        CircleAvatar(
+                          radius: 14,
+                          backgroundColor: dept.color,
+                          child: Icon(Icons.business, color: Colors.white, size: 14),
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            dept.name,
+                            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+                            overflow: TextOverflow.ellipsis,
+                            maxLines: 2,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }).toList(),
+              ),
             ),
           ),
-          ...List.generate(14, (index) {
-            final hour = 10 + index;
-            final slotBooking = doctorBookings.firstWhere(
-              (b) => b.startTime.hour == hour,
-              orElse: () => Booking(
-                id: '', patientId: '', patientName: '', doctorId: '', 
-                startTime: DateTime(2000), endTime: DateTime(2000), status: '',
-              ),
-            );
-
-            if (slotBooking.id.isNotEmpty) {
-              return _buildBookingCard(slotBooking, doctor.color, provider.hourHeight);
-            }
-
-            return _buildEmptySlot(doctor, hour, provider.hourHeight);
-          }),
         ],
       ),
     );
   }
 
-  Widget _buildBookingCard(Booking booking, Color color, double hourHeight) {
-    final duration = booking.endTime.difference(booking.startTime).inMinutes;
-    final height = (duration / 60) * hourHeight;
-
-    // Dynamic padding: if height is small, reduce padding
-    final double padding = height < 30 ? 2.0 : 8.0;
-
+  // صف الأوقات في الأعلى
+  Widget _buildTimeHeader(List<int> hours, double cellWidth) {
     return Container(
-      height: height, 
-      margin: const EdgeInsets.all(4),
-      padding: EdgeInsets.all(padding),
-      decoration: BoxDecoration(
-        color: color.withAlpha(204),
-        borderRadius: BorderRadius.circular(8),
-        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
-      ),
-      child: InkWell(
-        onTap: () => _showBookingOptions(booking),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min, // Important for small heights
-          children: [
-            // Only show name if height allows
-            if (height >= 15)
-              Flexible( // Use Flexible to prevent overflow
-                child: Text(
-                  booking.patientName,
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                  overflow: TextOverflow.ellipsis,
-                  maxLines: 1,
+      height: 50,
+      color: AppTheme.surface,
+      child: SingleChildScrollView(
+        // لا نستخدم controller هنا لتجنب خطأ multiple ScrollPosition
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: hours.map((hour) {
+            final hour12 = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
+            final period = hour >= 12 ? 'م' : 'ص';
+            
+            return Container(
+              width: cellWidth,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                border: Border(
+                  left: BorderSide(color: Colors.white.withAlpha(26)),
+                  bottom: BorderSide(color: Colors.white.withAlpha(26)),
                 ),
               ),
-            if (height > 40)
-              Text(
-                '${DateFormat('h:mm a').format(booking.startTime)} - ${DateFormat('h:mm a').format(booking.endTime)}',
-                style: const TextStyle(fontSize: 11, color: Colors.white70),
-                overflow: TextOverflow.ellipsis,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text('$hour12', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                  Text(period, style: TextStyle(fontSize: 10, color: Colors.white.withAlpha(128))),
+                ],
               ),
-            if (height > 80) ...[ 
-              const Spacer(),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: Colors.black26,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Text(
-                  _getStatusLabel(booking.status),
-                  style: const TextStyle(fontSize: 10),
-                ),
-              )
-            ]
-          ],
+            );
+          }).toList(),
         ),
       ),
     );
   }
 
-  Widget _buildEmptySlot(Doctor doctor, int hour, double height) {
-    return InkWell(
-      onTap: () async {
-        final date = context.read<ScheduleProvider>().selectedDate;
-        final slotDate = DateTime(date.year, date.month, date.day, hour, 0);
+  // الجدول الرئيسي (Grid) - حسب الأقسام
+  Widget _buildGrid(List<Department> departments, List<int> hours, List<Booking> bookings, double cellSize) {
+    return Column(
+      children: departments.map((dept) {
+        // الحجوزات لهذا القسم (حسب department_id)
+        final deptBookings = bookings.where((b) => b.departmentId == dept.id).toList();
         
-        final result = await showDialog(
-          context: context,
-          builder: (_) => BookingDialog(
-            initialDate: slotDate,
-            preselectedDoctorId: doctor.id,
+        return SizedBox(
+          height: cellSize,
+          child: Row(
+            children: hours.map((hour) {
+              final hourBookings = deptBookings.where((b) => b.startTime.hour == hour).toList();
+              return _buildCell(dept, hour, hourBookings, cellSize);
+            }).toList(),
           ),
         );
+      }).toList(),
+    );
+  }
 
-        if (result == true) {
-          if (mounted) context.read<ScheduleProvider>().loadData();
-          ScaffoldMessenger.of(context).showSnackBar(
-             SnackBar(content: Text('تم إضافة الحجز للدكتور ${doctor.name}')),
-          );
-        }
-      },
+  // خلية واحدة في الجدول
+  Widget _buildCell(Department dept, int hour, List<Booking> bookings, double size) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        border: Border(
+          left: BorderSide(color: Colors.white.withAlpha(13)),
+          bottom: BorderSide(color: Colors.white.withAlpha(13)),
+        ),
+      ),
+      child: bookings.isEmpty
+          ? _buildEmptyCell(dept, hour)
+          : _buildBookingsCell(bookings, dept.color),
+    );
+  }
+
+  // خلية فارغة (للحجز الجديد)
+  Widget _buildEmptyCell(Department dept, int hour) {
+    return InkWell(
+      onTap: () => _openBookingDialog(dept, hour),
       child: Container(
-        height: height,
+        color: Colors.transparent,
+        child: Center(
+          child: Icon(Icons.add, color: Colors.white.withAlpha(26), size: 16),
+        ),
+      ),
+    );
+  }
+
+  // خلية تحتوي على حجوزات
+  Widget _buildBookingsCell(List<Booking> bookings, Color doctorColor) {
+    if (bookings.length == 1) {
+      return _buildBookingChip(bookings.first);
+    }
+    
+    // حجوزات متعددة في نفس الساعة
+    return Column(
+      children: bookings.take(3).map((b) => Expanded(child: _buildBookingChip(b))).toList(),
+    );
+  }
+
+  // شريحة الحجز داخل الخلية
+  Widget _buildBookingChip(Booking booking) {
+    final statusColor = _getStatusColor(booking.status);
+    
+    return GestureDetector(
+      onTap: () => _showBookingOptions(booking),
+      child: Container(
+        margin: const EdgeInsets.all(2),
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
         decoration: BoxDecoration(
-          border: Border(bottom: BorderSide(color: Colors.white.withAlpha(13))),
+          gradient: LinearGradient(
+            colors: [statusColor.withAlpha(200), statusColor.withAlpha(100)],
+          ),
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: statusColor, width: 1),
         ),
         child: Center(
-          child: Icon(Icons.add_circle_outline, color: Colors.white.withAlpha(26)),
+          child: Text(
+            booking.patientName,
+            style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Colors.white),
+            overflow: TextOverflow.ellipsis,
+            maxLines: 1,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Color _getStatusColor(String? status) {
+    switch (status) {
+      case 'completed': return Colors.green;
+      case 'arrived': return Colors.blue;
+      case 'booked':
+      case 'scheduled': return Colors.orange;
+      case 'cancelled': return Colors.red;
+      case 'no_show': return Colors.grey;
+      case 'in_session': return Colors.cyan;
+      default: return Colors.purple;
+    }
+  }
+
+  void _openBookingDialog(Department dept, int hour) async {
+    final date = context.read<ScheduleProvider>().selectedDate;
+    final slotDate = DateTime(date.year, date.month, date.day, hour, 0);
+    
+    final scheduleProvider = context.read<ScheduleProvider>();
+    AdminProvider? adminProvider;
+    try {
+      adminProvider = context.read<AdminProvider>();
+    } catch (_) {}
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => MultiProvider(
+        providers: [
+          ChangeNotifierProvider.value(value: scheduleProvider),
+          if (adminProvider != null) ChangeNotifierProvider.value(value: adminProvider),
+        ],
+        child: BookingDialog(
+          preselectedDepartmentId: dept.id,
+          initialDate: slotDate,
         ),
       ),
     );
@@ -321,216 +439,88 @@ class _TimelineViewState extends State<TimelineView> {
       context: context,
       backgroundColor: Colors.transparent,
       builder: (ctx) => Container(
-        padding: const EdgeInsets.all(24),
-        decoration: BoxDecoration(
-          color: AppTheme.surface,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        padding: const EdgeInsets.all(20),
+        decoration: const BoxDecoration(
+          color: Color(0xFF1E1E2E),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text('خيارات الحجز - ${booking.patientName}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 16),
-            
-            if (booking.status == 'scheduled' || booking.status == 'booked') ...[
-               ListTile(
-                 leading: const Icon(Icons.payment, color: Colors.green),
-                 title: const Text('استلام المبلغ (تحويل إلى "وصل")'),
-                 onTap: () async {
-                    Navigator.pop(ctx);
-                    await context.read<ScheduleProvider>().updateBookingStatus(booking.id, 'arrived');
-                    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم استلام المبلغ وتسجيل وصول المريض')));
-                 },
-               ),
-               ListTile(
-                 leading: const Icon(Icons.access_time, color: Colors.orange),
-                 title: const Text('تأجيل الموعد'),
-                 onTap: () {
-                   Navigator.pop(ctx);
-                   _showCancelOrPostponeDialog(booking, isPostpone: true);
-                 },
-               ),
-               ListTile(
-                 leading: const Icon(Icons.cancel_outlined, color: Colors.red),
-                 title: const Text('إلغاء الموعد'),
-                 onTap: () {
-                   Navigator.pop(ctx);
-                   _showCancelOrPostponeDialog(booking, isPostpone: false);
-                 },
-               ),
-            ] else if (booking.status == 'arrived') ...[
-              // Only active if status is arrived (paid)
-              ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.blueAccent, minimumSize: const Size(double.infinity, 50)),
-                icon: const Icon(Icons.login),
-                label: const Text('إدخال للطبيب (بدء الجلسة)'),
-                onPressed: () async {
-                   Navigator.pop(ctx);
-                   await context.read<ScheduleProvider>().updateBookingStatus(booking.id, 'in_session');
-                   if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('بدأت الجلسة... العداد يعمل')));
-                },
-              ),
-              const SizedBox(height: 8),
-               ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.grey, minimumSize: const Size(double.infinity, 50)),
-                icon: const Icon(Icons.undo),
-                label: const Text('تراجع عن الوصول'),
-                onPressed: () async {
-                   Navigator.pop(ctx);
-                   await context.read<ScheduleProvider>().updateBookingStatus(booking.id, 'scheduled');
-                },
-              ),
-            ] else if (booking.status == 'in_session') ...[
-               ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.red, minimumSize: const Size(double.infinity, 50)),
-                icon: const Icon(Icons.stop),
-                label: const Text('إنهاء الجلسة وحجز موعد قادم'),
-                onPressed: () {
-                   Navigator.pop(ctx);
-                   _showEndSessionDialog(booking);
-                },
-              ),
-            ],
-            const SizedBox(height: 16),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _showEndSessionDialog(Booking booking) {
-    DateTime? nextDate;
-    
-    showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setState) {
-          return AlertDialog(
-            title: const Text('إنهاء الجلسة'),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
+            // معلومات الحجز
+            Row(
               children: [
-                const Text('هل تريد إنهاء الجلسة الحالية؟'),
-                const SizedBox(height: 16),
-                const Divider(),
-                const Text('الموعد القادم (اختياري)', style: TextStyle(fontWeight: FontWeight.bold)),
-                const SizedBox(height: 8),
-                ListTile(
-                  title: Text(nextDate == null ? 'حدد موعداً قادماً' : DateFormat('yyyy-MM-dd').format(nextDate!)),
-                  trailing: const Icon(Icons.calendar_today),
-                  tileColor: AppTheme.surface,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  onTap: () async {
-                    final date = await showDatePicker(
-                      context: context,
-                      initialDate: DateTime.now().add(const Duration(days: 7)),
-                      firstDate: DateTime.now(),
-                      lastDate: DateTime.now().add(const Duration(days: 365)),
-                    );
-                    if (date != null) {
-                      setState(() => nextDate = date);
-                    }
-                  },
+                CircleAvatar(
+                  backgroundColor: _getStatusColor(booking.status),
+                  child: Text(booking.patientName[0], style: const TextStyle(color: Colors.white)),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(booking.patientName, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                      Text('د. ${booking.doctorName}', style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                      Text(DateFormat('h:mm a').format(booking.startTime), style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                    ],
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: _getStatusColor(booking.status).withAlpha(51),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(_getStatusLabel(booking.status), style: TextStyle(color: _getStatusColor(booking.status), fontSize: 11)),
                 ),
               ],
             ),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
-              ElevatedButton(
-                onPressed: () {
-                  Navigator.pop(ctx);
-                  String msg = 'تم إنهاء الجلسة.';
-                  if (nextDate != null) {
-                    msg += ' وتم حجز الموعد القادم في ${DateFormat('MM-dd').format(nextDate!)}';
-                  }
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
-                },
-                child: const Text('تأكيد الإنهاء'),
-              ),
+            const SizedBox(height: 16),
+            const Divider(color: Colors.white24),
+            const SizedBox(height: 8),
+            
+            // الأزرار حسب الحالة
+            if (booking.status == 'scheduled' || booking.status == 'booked') ...[
+              _actionButton('استلام المبلغ (وصل)', Icons.payment, Colors.green, () async {
+                Navigator.pop(ctx);
+                await context.read<ScheduleProvider>().updateBookingStatus(booking.id, 'arrived');
+              }),
+              _actionButton('تأجيل الموعد', Icons.access_time, Colors.orange, () {
+                Navigator.pop(ctx);
+                // TODO: Show postpone dialog
+              }),
+              _actionButton('طلب إلغاء', Icons.cancel, Colors.red, () {
+                Navigator.pop(ctx);
+                // TODO: Show cancel request dialog
+              }),
+            ] else if (booking.status == 'arrived') ...[
+              _actionButton('إدخال للطبيب (بدء الجلسة)', Icons.login, Colors.blue, () async {
+                Navigator.pop(ctx);
+                await context.read<ScheduleProvider>().updateBookingStatus(booking.id, 'in_session');
+              }),
+            ] else if (booking.status == 'in_session') ...[
+              _actionButton('إنهاء الجلسة', Icons.stop, Colors.red, () async {
+                Navigator.pop(ctx);
+                await context.read<ScheduleProvider>().updateBookingStatus(booking.id, 'completed');
+              }),
             ],
-          );
-        }
+            
+            const SizedBox(height: 8),
+          ],
+        ),
       ),
     );
   }
 
-  void _showCancelOrPostponeDialog(Booking booking, {required bool isPostpone}) {
-    final reasonController = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(isPostpone ? 'تأجيل الموعد' : 'طلب إلغاء الموعد'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (!isPostpone)
-               Container(
-                 padding: const EdgeInsets.all(8),
-                 margin: const EdgeInsets.only(bottom: 16),
-                 decoration: BoxDecoration(
-                   color: Colors.red.withAlpha(26),
-                   borderRadius: BorderRadius.circular(8),
-                   border: Border.all(color: Colors.red.withAlpha(77)),
-                 ),
-                 child: const Row(
-                   children: [
-                     Icon(Icons.security, color: Colors.red, size: 20),
-                     SizedBox(width: 8),
-                     Expanded(child: Text('تنبيه: الإلغاء يتطلب موافقة المدير. سيتم تعليق الحجز حتى الموافقة.', style: TextStyle(color: Colors.red, fontSize: 12))),
-                   ],
-                 ),
-               ),
-            
-            Text(isPostpone 
-              ? 'يرجى تحديد سبب التأجيل (سيتم إشعار المريض).' 
-              : 'يرجى ذكر سبب الإلغاء بدقة للمدير.'),
-            const SizedBox(height: 16),
-            TextField(
-              controller: reasonController,
-              decoration: InputDecoration(
-                labelText: 'السبب (مطلوب)',
-                border: const OutlineInputBorder(),
-                filled: true,
-                fillColor: AppTheme.surface,
-              ),
-              maxLines: 2,
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('رجوع')),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: isPostpone ? Colors.orange : Colors.red),
-            onPressed: () async {
-              if (reasonController.text.isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('يرجى كتابة السبب')));
-                return;
-              }
-              Navigator.pop(ctx);
-              
-              if (isPostpone) {
-                 await context.read<ScheduleProvider>().logPostponement(booking.id, reasonController.text);
-                 if (context.mounted) {
-                   ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('تم تسجيل ملاحظة التأجيل. السبب: ${reasonController.text}'))
-                  );
-                 }
-              } else {
-                 await context.read<ScheduleProvider>().requestCancellation(booking.id, reasonController.text);
-                 if (context.mounted) {
-                   ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('تم رفع طلب الإلغاء للمدير. السبب: ${reasonController.text}'),
-                      backgroundColor: Colors.blueGrey,
-                    )
-                  );
-                 }
-              }
-            },
-            child: Text(isPostpone ? 'تأكيد التأجيل' : 'إرسال طلب الإلغاء'),
-          ),
-        ],
+  Widget _actionButton(String label, IconData icon, Color color, VoidCallback onTap) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: ListTile(
+        leading: Icon(icon, color: color),
+        title: Text(label, style: const TextStyle(fontSize: 14)),
+        onTap: onTap,
+        tileColor: color.withAlpha(13),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       ),
     );
   }
@@ -538,10 +528,11 @@ class _TimelineViewState extends State<TimelineView> {
   String _getStatusLabel(String status) {
     switch (status) {
       case 'booked': return 'محجوز';
-      case 'arrived': return 'وصل/تم الدفع';
-      case 'in_session': return 'بالجلسة';
+      case 'scheduled': return 'مجدول';
+      case 'arrived': return 'وصل';
+      case 'in_session': return 'في الجلسة';
       case 'completed': return 'مكتمل';
-      case 'cancellation_pending': return 'بانتظار الموافقة على الإلغاء';
+      case 'cancelled': return 'ملغي';
       default: return status;
     }
   }

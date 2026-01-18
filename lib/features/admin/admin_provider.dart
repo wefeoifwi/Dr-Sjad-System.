@@ -3,6 +3,19 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 class AdminProvider extends ChangeNotifier {
   final SupabaseClient _supabase = Supabase.instance.client;
+  
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SMART CACHING SYSTEM - Prevents unnecessary reloads
+  // ═══════════════════════════════════════════════════════════════════════════
+  DateTime? _staffLastLoad;
+  DateTime? _servicesLastLoad;
+  DateTime? _devicesLastLoad;
+  static const Duration _cacheValidDuration = Duration(minutes: 5);
+  
+  bool _isCacheValid(DateTime? lastLoad) {
+    if (lastLoad == null) return false;
+    return DateTime.now().difference(lastLoad) < _cacheValidDuration;
+  }
 
   // --- Activity Logging Helper ---
   Future<void> _logActivity({
@@ -16,12 +29,11 @@ class AdminProvider extends ChangeNotifier {
         'action': action,
         'entity_type': entityType,
         'entity_id': entityId,
-        'details': details != null ? details.toString() : null,
+        'details': details?.toString(),
         'created_at': DateTime.now().toIso8601String(),
       });
     } catch (e) {
       debugPrint('Activity log error: $e');
-      // Don't throw - logging failures shouldn't break main operations
     }
   }
 
@@ -34,7 +46,10 @@ class AdminProvider extends ChangeNotifier {
   List<Map<String, dynamic>> get employees => _employees;
   bool get isLoading => _isLoading;
 
-  Future<void> loadStaff() async {
+  Future<void> loadStaff({bool force = false}) async {
+    // Use cache if valid and not forced
+    if (!force && _isCacheValid(_staffLastLoad) && _doctors.isNotEmpty) return;
+    
     _isLoading = true;
     notifyListeners();
     try {
@@ -43,6 +58,7 @@ class AdminProvider extends ChangeNotifier {
 
       _doctors = allProfiles.where((p) => p['role'] == 'doctor').toList();
       _employees = allProfiles.where((p) => p['role'] != 'doctor').toList();
+      _staffLastLoad = DateTime.now();
     } catch (e) {
       debugPrint('Error loading staff: $e');
     } finally {
@@ -91,6 +107,11 @@ class AdminProvider extends ChangeNotifier {
       notifyListeners();
     } catch (e) {
       debugPrint('Error adding staff: $e');
+      // Handle specific PostgreSQL errors
+      final errorStr = e.toString();
+      if (errorStr.contains('23505')) {
+        throw Exception('اسم المستخدم "$username" مستخدم مسبقاً. الرجاء اختيار اسم آخر.');
+      }
       rethrow;
     }
   }
@@ -118,24 +139,6 @@ class AdminProvider extends ChangeNotifier {
      }
   }
 
-  // --- Patient Management ---
-  List<Map<String, dynamic>> _patients = [];
-  List<Map<String, dynamic>> get patients => _patients;
-
-  Future<void> loadPatients() async {
-    _isLoading = true;
-    notifyListeners();
-    try {
-      final response = await _supabase.from('patients').select().order('created_at', ascending: false);
-      _patients = List<Map<String, dynamic>>.from(response);
-    } catch (e) {
-      debugPrint('Error loading patients: $e');
-    } finally {
-      _isLoading = false;
-      notifyListeners();
-    }
-  }
-
   // --- Assets (Devices & Services) ---
   List<Map<String, dynamic>> _devices = [];
   List<Map<String, dynamic>> _services = [];
@@ -143,10 +146,12 @@ class AdminProvider extends ChangeNotifier {
   List<Map<String, dynamic>> get devices => _devices;
   List<Map<String, dynamic>> get services => _services;
 
-  Future<void> loadDevices() async {
+  Future<void> loadDevices({bool force = false}) async {
+    if (!force && _isCacheValid(_devicesLastLoad) && _devices.isNotEmpty) return;
     try {
       final data = await _supabase.from('devices').select().order('created_at');
       _devices = List<Map<String, dynamic>>.from(data);
+      _devicesLastLoad = DateTime.now();
       notifyListeners();
     } catch (e) {
        debugPrint('Error loading devices: $e');
@@ -160,7 +165,13 @@ class AdminProvider extends ChangeNotifier {
       }).select().single();
       _devices.add(res);
       notifyListeners();
-    } catch (e) { rethrow; }
+    } catch (e) {
+      debugPrint('Error adding device: $e');
+      if (e.toString().contains('23505')) {
+        throw Exception('الجهاز "$name" موجود مسبقاً.');
+      }
+      rethrow;
+    }
   }
 
   Future<void> deleteDevice(String id) async {
@@ -171,10 +182,26 @@ class AdminProvider extends ChangeNotifier {
     } catch (e) { rethrow; }
   }
 
-  Future<void> loadServices() async {
+  Future<void> updateDevice(String id, {required String name, String? type, String? status}) async {
+    try {
+      final updated = await _supabase.from('devices').update({
+        'name': name,
+        'type': type,
+        'status': status ?? 'active',
+      }).eq('id', id).select().single();
+      
+      final index = _devices.indexWhere((d) => d['id'] == id);
+      if (index != -1) _devices[index] = updated;
+      notifyListeners();
+    } catch (e) { rethrow; }
+  }
+
+  Future<void> loadServices({bool force = false}) async {
+    if (!force && _isCacheValid(_servicesLastLoad) && _services.isNotEmpty) return;
     try {
       final data = await _supabase.from('services').select().order('created_at');
       _services = List<Map<String, dynamic>>.from(data);
+      _servicesLastLoad = DateTime.now();
       notifyListeners();
     } catch (e) { debugPrint('Error loading services: $e'); }
   }
@@ -185,6 +212,36 @@ class AdminProvider extends ChangeNotifier {
         'name': name, 'default_price': price,
       }).select().single();
       _services.add(res);
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Error adding service: $e');
+      if (e.toString().contains('23505')) {
+        throw Exception('الخدمة "$name" موجودة مسبقاً.');
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> deleteService(String id) async {
+    try {
+      await _supabase.from('services').delete().eq('id', id);
+      _services.removeWhere((s) => s['id'] == id);
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Error deleting service: $e');
+      rethrow;
+    }
+  }
+
+  Future<void> updateService(String id, {required String name, required double price}) async {
+    try {
+      final updated = await _supabase.from('services').update({
+        'name': name,
+        'default_price': price,
+      }).eq('id', id).select().single();
+      
+      final index = _services.indexWhere((s) => s['id'] == id);
+      if (index != -1) _services[index] = updated;
       notifyListeners();
     } catch (e) { rethrow; }
   }
@@ -217,6 +274,118 @@ class AdminProvider extends ChangeNotifier {
     } catch (e) { rethrow; }
   }
 
+  Future<void> updateDepartment(String id, {required String name}) async {
+    try {
+      final updated = await _supabase.from('departments').update({
+        'name': name,
+      }).eq('id', id).select().single();
+      
+      final index = _departments.indexWhere((d) => d['id'] == id);
+      if (index != -1) _departments[index] = updated;
+      notifyListeners();
+    } catch (e) { rethrow; }
+  }
+
+  // --- Staff Status Toggle ---
+  Future<void> toggleStaffStatus(String id, bool isActive) async {
+    try {
+      await _supabase.from('profiles').update({
+        'is_active': isActive,
+      }).eq('id', id);
+      
+      // Update local lists
+      for (var list in [_doctors, _employees]) {
+        final index = list.indexWhere((s) => s['id'] == id);
+        if (index != -1) {
+          list[index] = {...list[index], 'is_active': isActive};
+        }
+      }
+      notifyListeners();
+    } catch (e) { rethrow; }
+  }
+
+  // --- Update Staff Info (Name, Username, Phone, Password) ---
+  Future<void> updateStaffInfo({
+    required String userId,
+    required String name,
+    required String username,
+    required String phone,
+    String? newPassword,
+  }) async {
+    try {
+      // 1. Update profile table
+      final updatedProfile = await _supabase.from('profiles').update({
+        'name': name,
+        'username': username,
+        'email': '$username@carepoint.local',
+        'phone': phone,
+        if (newPassword != null && newPassword.isNotEmpty) 'password': newPassword,
+      }).eq('id', userId).select().single();
+      
+      // 2. Update local lists
+      for (var list in [_doctors, _employees]) {
+        final index = list.indexWhere((s) => s['id'] == userId);
+        if (index != -1) {
+          list[index] = updatedProfile;
+        }
+      }
+      
+      // 3. Log activity
+      await _logActivity(
+        action: 'update_staff',
+        entityType: 'profile',
+        entityId: userId,
+        details: {
+          'name': name,
+          'username': username,
+          'password_changed': newPassword != null && newPassword.isNotEmpty,
+        },
+      );
+      
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Error updating staff: $e');
+      final errorStr = e.toString();
+      if (errorStr.contains('23505')) {
+        throw Exception('اسم المستخدم "$username" مستخدم مسبقاً. الرجاء اختيار اسم آخر.');
+      }
+      rethrow;
+    }
+  }
+
+  // --- Activity Log ---
+  List<Map<String, dynamic>> _activityLogs = [];
+  List<Map<String, dynamic>> get activityLogs => _activityLogs;
+
+  Future<void> loadActivityLogs({int limit = 100}) async {
+    try {
+      final data = await _supabase
+          .from('activity_logs')
+          .select('*, profiles(name)')
+          .order('created_at', ascending: false)
+          .limit(limit);
+      _activityLogs = List<Map<String, dynamic>>.from(data);
+      notifyListeners();
+    } catch (e) { 
+      debugPrint('Error loading activity logs: $e');
+      // Table might not exist yet, create empty list
+      _activityLogs = [];
+    }
+  }
+
+  Future<void> logActivity({required String userId, required String action, String? details}) async {
+    try {
+      await _supabase.from('activity_logs').insert({
+        'user_id': userId,
+        'action': action,
+        'details': details,
+        'created_at': DateTime.now().toIso8601String(),
+      });
+    } catch (e) { 
+      debugPrint('Error logging activity: $e');
+    }
+  }
+
   // --- Reports & Analytics ---
   List<Map<String, dynamic>> _allSessions = [];
   List<Map<String, dynamic>> _pendingCancellations = [];
@@ -225,7 +394,7 @@ class AdminProvider extends ChangeNotifier {
   Map<String, dynamic> _callCenterStats = {};
   List<Map<String, dynamic>> _doctorPerformance = [];
   List<Map<String, dynamic>> _serviceFinancials = [];
-  List<String> _smartInsights = [];
+  final List<String> _smartInsights = [];
   Map<String, dynamic> _patientStats = {};
   List<Map<String, dynamic>> _roomStats = [];
   Map<String, dynamic> _followUpStats = {};
@@ -340,7 +509,6 @@ class AdminProvider extends ChangeNotifier {
           
           if (s['end_time'] != null) {
             final d = DateTime.parse(s['end_time']);
-            final dayKey = "${d.year}-${d.month}-${d.day}"; // Or formatted
             final dayLabel = "${d.month}/${d.day}";
             dailyRev[dayLabel] = (dailyRev[dayLabel] ?? 0) + price;
           }
@@ -369,7 +537,11 @@ class AdminProvider extends ChangeNotifier {
           uniquePatients.add(pId);
           if (patient != null) {
              final g = patient['gender'];
-             if (g == 'male') male++; else female++;
+             if (g == 'male') {
+               male++;
+             } else {
+               female++;
+             }
              
              final src = patient['source'] ?? 'unknown';
              sourceCounts[src] = (sourceCounts[src] ?? 0) + 1;
@@ -456,6 +628,84 @@ class AdminProvider extends ChangeNotifier {
   double get monthlyRevenue => _monthlyRevenue;
   List<Map<String, dynamic>> get recentTransactions => _recentTransactions;
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PATIENTS - With Pagination & Server-Side Search for 500K+ patients
+  // ═══════════════════════════════════════════════════════════════════════════
+  
+  List<Map<String, dynamic>> _patients = [];
+  int _patientsTotal = 0;
+  int _patientsPage = 0;
+  String _patientsSearch = '';
+  bool _patientsHasMore = true;
+  bool _patientsLoading = false;
+  static const int _patientsPageSize = 50;
+
+  List<Map<String, dynamic>> get patients => _patients;
+  int get patientsTotal => _patientsTotal;
+  int get patientsPage => _patientsPage;
+  bool get patientsHasMore => _patientsHasMore;
+  bool get patientsLoading => _patientsLoading;
+
+  /// Load patients with pagination - call with reset=true for first load
+  Future<void> loadPatients({bool reset = false, String? search}) async {
+    if (_patientsLoading) return;
+    
+    _patientsLoading = true;
+    if (reset) {
+      _patients = [];
+      _patientsPage = 0;
+      _patientsHasMore = true;
+    }
+    if (search != null) _patientsSearch = search;
+    notifyListeners();
+
+    try {
+      final from = _patientsPage * _patientsPageSize;
+      final to = from + _patientsPageSize - 1;
+
+      PostgrestFilterBuilder query = _supabase.from('patients').select();
+      
+      // Server-side search
+      if (_patientsSearch.isNotEmpty) {
+        query = query.or('name.ilike.%$_patientsSearch%,phone.ilike.%$_patientsSearch%');
+      }
+
+      final response = await query.order('created_at', ascending: false).range(from, to);
+      
+      final newPatients = List<Map<String, dynamic>>.from(response);
+      _patients.addAll(newPatients);
+      _patientsHasMore = newPatients.length == _patientsPageSize;
+      _patientsPage++;
+      
+      // Get total count separately if needed (optional, can be slow with large data)
+      if (reset && _patientsSearch.isEmpty) {
+        try {
+          final countRes = await _supabase.from('patients').select('id').count(CountOption.exact);
+          _patientsTotal = countRes.count;
+        } catch (_) {
+          _patientsTotal = _patients.length;
+        }
+      }
+    } catch (e) {
+      debugPrint('Error loading patients: $e');
+    } finally {
+      _patientsLoading = false;
+      notifyListeners();
+    }
+  }
+
+  /// Search patients (server-side)
+  Future<void> searchPatients(String query) async {
+    await loadPatients(reset: true, search: query);
+  }
+
+  /// Load more patients (next page)
+  Future<void> loadMorePatients() async {
+    if (_patientsHasMore && !_patientsLoading) {
+      await loadPatients();
+    }
+  }
+
   Future<void> addPatient({
     required String name,
     required String phone,
@@ -464,27 +714,12 @@ class AdminProvider extends ChangeNotifier {
     String? notes,
   }) async {
     try {
-      final newPatient = {
-        'name': name,
-        'phone': phone,
-        'age': age,
-        'address': address,
-        'medical_history': notes, // Mapping notes to medical_history or just ignoring if column missing, assuming medical_history exists or adding it
-        'created_at': DateTime.now().toIso8601String(),
-      };
-      
-      // Check if medical_history exists in schema, if not just insert others. 
-      // Based on schema it might not be there, so let's stick to safe fields or just 'info'.
-      // actually schema has 'medical_history' and 'notes' usually? 
-      // Let's use 'notes' if it was added, otherwise ignore. 
-      // Re-checking schema... `patients` table has `medical_history`.
-      
       final res = await _supabase.from('patients').insert({
         'name': name,
         'phone': phone,
         'age': age,
         'address': address,
-        // 'medical_history': notes, // Optional, uncomment if schema supports
+        'created_at': DateTime.now().toIso8601String(),
       }).select().single();
 
       _patients.insert(0, res);

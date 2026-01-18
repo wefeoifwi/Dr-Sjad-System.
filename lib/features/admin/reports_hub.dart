@@ -1,124 +1,292 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 import 'package:intl/intl.dart' as intl;
 import 'package:fl_chart/fl_chart.dart';
-import 'admin_provider.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../core/theme.dart';
 
 class ReportsScreen extends StatefulWidget {
   const ReportsScreen({super.key});
-
   @override
   State<ReportsScreen> createState() => _ReportsScreenState();
 }
 
 class _ReportsScreenState extends State<ReportsScreen> with SingleTickerProviderStateMixin {
-  DateTimeRange? _selectedDateRange;
   late TabController _tabController;
+  
+  // Filters
+  DateTimeRange? _dateRange;
   String _selectedDoctor = 'all';
   String _selectedService = 'all';
+  String _selectedStatus = 'all';
+  String _selectedReception = 'all';
+  String _selectedCallCenter = 'all';
+  String _searchQuery = '';
   
-  final List<String> _reportTabs = [
-    'نظرة عامة',
-    'المالية',
-    'الأطباء',
-    'المرضى',
-    'الجلسات',
-    'الأجهزة',
-  ];
+  // Data
+  bool _isLoading = true;
+  Map<String, dynamic> _stats = {};
+  List<Map<String, dynamic>> _sessions = [];
+  List<Map<String, dynamic>> _patients = [];
+  List<Map<String, dynamic>> _doctors = [];
+  List<Map<String, dynamic>> _services = [];
+  // ignore: unused_field - stored for future use
+  List<Map<String, dynamic>> _devices = [];
+  // ignore: unused_field - stored for future use 
+  List<Map<String, dynamic>> _receptionists = [];
+  // ignore: unused_field - stored for future use
+  List<Map<String, dynamic>> _callCenterStaff = [];
+  
+  // Quick Filters
+  String _quickFilter = 'month'; // today, week, month, year, custom
+  
+  final _searchController = TextEditingController();
   
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: _reportTabs.length, vsync: this);
-    final now = DateTime.now();
-    _selectedDateRange = DateTimeRange(
-      start: DateTime(now.year, now.month, 1),
-      end: DateTime(now.year, now.month + 1, 0),
-    );
-    
-    WidgetsBinding.instance.addPostFrameCallback((_) => _refreshData());
+    _tabController = TabController(length: 5, vsync: this);
+    _setQuickFilter('month');
+    _loadData();
   }
   
   @override
   void dispose() {
     _tabController.dispose();
+    _searchController.dispose();
     super.dispose();
   }
-
-  void _refreshData() {
-    if (_selectedDateRange != null) {
-      context.read<AdminProvider>().generateAdvancedReports(
-        customStartDate: _selectedDateRange!.start,
-        customEndDate: _selectedDateRange!.end,
-      );
-    }
+  
+  void _setQuickFilter(String filter) {
+    final now = DateTime.now();
+    setState(() {
+      _quickFilter = filter;
+      switch (filter) {
+        case 'today':
+          _dateRange = DateTimeRange(
+            start: DateTime(now.year, now.month, now.day),
+            end: DateTime(now.year, now.month, now.day, 23, 59, 59),
+          );
+          break;
+        case 'week':
+          final weekStart = now.subtract(Duration(days: now.weekday - 1));
+          _dateRange = DateTimeRange(
+            start: DateTime(weekStart.year, weekStart.month, weekStart.day),
+            end: now,
+          );
+          break;
+        case 'month':
+          _dateRange = DateTimeRange(
+            start: DateTime(now.year, now.month, 1),
+            end: DateTime(now.year, now.month + 1, 0),
+          );
+          break;
+        case 'year':
+          _dateRange = DateTimeRange(
+            start: DateTime(now.year, 1, 1),
+            end: DateTime(now.year, 12, 31),
+          );
+          break;
+      }
+    });
+    _loadData();
   }
-
-  Future<void> _pickDateRange() async {
-    final picked = await showDateRangePicker(
-      context: context,
-      firstDate: DateTime(2023),
-      lastDate: DateTime(2030),
-      initialDateRange: _selectedDateRange,
-      locale: const Locale('ar'),
-      builder: (context, child) {
-        return Theme(
-          data: Theme.of(context).copyWith(
-            colorScheme: const ColorScheme.light(
-              primary: Color(0xFF6C63FF),
-              onPrimary: Colors.white,
-              surface: Colors.white,
-              onSurface: Colors.black,
-            ),
-          ),
-          child: child!,
-        );
-      },
-    );
-
-    if (picked != null) {
-      setState(() => _selectedDateRange = picked);
-      _refreshData();
+  
+  Future<void> _loadData() async {
+    setState(() => _isLoading = true);
+    
+    try {
+      final supabase = Supabase.instance.client;
+      
+      // Load all data in parallel for speed
+      final results = await Future.wait([
+        supabase.from('sessions').select('*, patients(name, phone, gender, source), services(name), profiles!sessions_doctor_id_fkey(name)'),
+        supabase.from('patients').select('*'),
+        supabase.from('profiles').select('*').eq('role', 'doctor'),
+        supabase.from('services').select('*'),
+        supabase.from('devices').select('*'),
+        supabase.from('profiles').select('*').eq('role', 'reception'),
+        supabase.from('profiles').select('*').eq('role', 'call_center'),
+      ]);
+      
+      _sessions = List<Map<String, dynamic>>.from(results[0]);
+      _patients = List<Map<String, dynamic>>.from(results[1]);
+      _doctors = List<Map<String, dynamic>>.from(results[2]);
+      _services = List<Map<String, dynamic>>.from(results[3]);
+      _devices = List<Map<String, dynamic>>.from(results[4]);
+      _receptionists = List<Map<String, dynamic>>.from(results[5]);
+      _callCenterStaff = List<Map<String, dynamic>>.from(results[6]);
+      
+      _calculateStats();
+    } catch (e) {
+      debugPrint('Error loading data: $e');
     }
+    
+    setState(() => _isLoading = false);
+  }
+  
+  void _calculateStats() {
+    // Filter sessions by date
+    final filtered = _sessions.where((s) {
+      if (s['start_time'] == null) return false;
+      final time = DateTime.parse(s['start_time']);
+      return _dateRange == null || 
+          (time.isAfter(_dateRange!.start.subtract(const Duration(days: 1))) && 
+           time.isBefore(_dateRange!.end.add(const Duration(days: 1))));
+    }).toList();
+    
+    // Apply other filters
+    final filteredByAll = filtered.where((s) {
+      if (_selectedDoctor != 'all' && s['doctor_id']?.toString() != _selectedDoctor) return false;
+      if (_selectedService != 'all' && s['service_id']?.toString() != _selectedService) return false;
+      if (_selectedStatus != 'all' && s['status'] != _selectedStatus) return false;
+      
+      // Filter by reception or call center who booked
+      if (_selectedReception != 'all') {
+        final bookedById = s['booked_by_id']?.toString() ?? '';
+        if (bookedById != _selectedReception) return false;
+      }
+      if (_selectedCallCenter != 'all') {
+        final bookedById = s['booked_by_id']?.toString() ?? '';
+        if (bookedById != _selectedCallCenter) return false;
+      }
+      
+      // Enhanced search - search everything
+      if (_searchQuery.isNotEmpty) {
+        final q = _searchQuery.toLowerCase();
+        final patientName = (s['patients']?['name'] ?? '').toString().toLowerCase();
+        final patientPhone = (s['patients']?['phone'] ?? '').toString().toLowerCase();
+        final serviceName = (s['services']?['name'] ?? '').toString().toLowerCase();
+        final doctorName = (s['profiles']?['name'] ?? '').toString().toLowerCase();
+        final bookedByName = (s['booked_by']?['name'] ?? '').toString().toLowerCase();
+        final status = (s['status'] ?? '').toString().toLowerCase();
+        final notes = (s['notes'] ?? '').toString().toLowerCase();
+        
+        if (!patientName.contains(q) && 
+            !patientPhone.contains(q) &&
+            !serviceName.contains(q) &&
+            !doctorName.contains(q) &&
+            !bookedByName.contains(q) &&
+            !status.contains(q) &&
+            !notes.contains(q)) {
+          return false;
+        }
+      }
+      return true;
+    }).toList();
+    
+    // Calculate stats
+    int totalRevenue = 0;
+    int todayRevenue = 0;
+    int completed = 0, cancelled = 0, noShow = 0, pending = 0, arrived = 0;
+    Map<String, int> hourlyBookings = {};
+    Map<String, int> dailyRevenue = {};
+    Map<String, int> serviceRevenue = {};
+    Map<String, Map<String, dynamic>> doctorStats = {};
+    
+    final today = DateTime.now();
+    
+    for (var s in filteredByAll) {
+      final price = (s['price'] ?? 0) as int;
+      final status = s['status'] ?? '';
+      final startTime = s['start_time'] != null ? DateTime.parse(s['start_time']) : null;
+      
+      if (status == 'completed') {
+        totalRevenue += price;
+        completed++;
+        
+        if (startTime != null) {
+          // Today revenue
+          if (startTime.year == today.year && startTime.month == today.month && startTime.day == today.day) {
+            todayRevenue += price;
+          }
+          
+          // Daily revenue
+          final dayKey = intl.DateFormat('MM/dd').format(startTime);
+          dailyRevenue[dayKey] = (dailyRevenue[dayKey] ?? 0) + price;
+          
+          // Hourly
+          hourlyBookings['${startTime.hour}'] = (hourlyBookings['${startTime.hour}'] ?? 0) + 1;
+          
+          // Service revenue
+          final serviceName = s['services']?['name'] ?? 'غير محدد';
+          serviceRevenue[serviceName] = (serviceRevenue[serviceName] ?? 0) + price;
+        }
+      } else if (status == 'cancelled') {
+        cancelled++;
+      } else if (status == 'no_show') {
+        noShow++;
+      } else if (status == 'arrived') {
+        arrived++;
+      } else {
+        pending++;
+      }
+      
+      // Doctor stats
+      final docId = s['doctor_id']?.toString() ?? '';
+      final docName = s['profiles']?['name'] ?? 'غير محدد';
+      if (docId.isNotEmpty) {
+        if (!doctorStats.containsKey(docId)) {
+          doctorStats[docId] = {'name': docName, 'sessions': 0, 'revenue': 0, 'completed': 0, 'cancelled': 0};
+        }
+        doctorStats[docId]!['sessions'] = (doctorStats[docId]!['sessions'] ?? 0) + 1;
+        if (status == 'completed') {
+          doctorStats[docId]!['revenue'] = (doctorStats[docId]!['revenue'] ?? 0) + price;
+          doctorStats[docId]!['completed'] = (doctorStats[docId]!['completed'] ?? 0) + 1;
+        } else if (status == 'cancelled') {
+          doctorStats[docId]!['cancelled'] = (doctorStats[docId]!['cancelled'] ?? 0) + 1;
+        }
+      }
+    }
+    
+    // Sort service revenue
+    var sortedServices = serviceRevenue.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    
+    // Sort doctor stats
+    var sortedDoctors = doctorStats.values.toList()
+      ..sort((a, b) => (b['revenue'] as int).compareTo(a['revenue'] as int));
+    
+    _stats = {
+      'totalRevenue': totalRevenue,
+      'todayRevenue': todayRevenue,
+      'totalSessions': filteredByAll.length,
+      'completed': completed,
+      'cancelled': cancelled,
+      'noShow': noShow,
+      'pending': pending,
+      'arrived': arrived,
+      'avgSession': completed > 0 ? totalRevenue ~/ completed : 0,
+      'completionRate': filteredByAll.isNotEmpty ? (completed / filteredByAll.length * 100).toStringAsFixed(1) : '0',
+      'cancellationRate': filteredByAll.isNotEmpty ? (cancelled / filteredByAll.length * 100).toStringAsFixed(1) : '0',
+      'hourlyBookings': hourlyBookings,
+      'dailyRevenue': dailyRevenue,
+      'serviceRevenue': sortedServices,
+      'doctorStats': sortedDoctors,
+      'filteredSessions': filteredByAll,
+    };
   }
 
   @override
   Widget build(BuildContext context) {
-    final admin = context.watch<AdminProvider>();
-    
     return Scaffold(
-      backgroundColor: const Color(0xFFF8FAFC),
+      backgroundColor: AppTheme.background,
       body: Column(
         children: [
-          // Header
-          _buildHeader(admin),
-          
-          // Tab Bar
-          Container(
-            color: Colors.white,
-            child: TabBar(
-              controller: _tabController,
-              isScrollable: true,
-              labelColor: const Color(0xFF6C63FF),
-              unselectedLabelColor: Colors.grey,
-              indicatorColor: const Color(0xFF6C63FF),
-              tabs: _reportTabs.map((t) => Tab(text: t)).toList(),
-            ),
-          ),
-          
-          // Content
+          _buildHeader(),
+          _buildQuickFilters(),
+          _buildAdvancedFilters(),
+          _buildTabBar(),
           Expanded(
-            child: admin.isLoading
+            child: _isLoading
                 ? const Center(child: CircularProgressIndicator())
                 : TabBarView(
                     controller: _tabController,
                     children: [
-                      _buildOverviewTab(admin),
-                      _buildFinancialTab(admin),
-                      _buildDoctorsTab(admin),
-                      _buildPatientsTab(admin),
-                      _buildSessionsTab(admin),
-                      _buildDevicesTab(admin),
+                      _buildOverviewTab(),
+                      _buildFinancialTab(),
+                      _buildDoctorsTab(),
+                      _buildSessionsTab(),
+                      _buildPatientsTab(),
                     ],
                   ),
           ),
@@ -127,414 +295,272 @@ class _ReportsScreenState extends State<ReportsScreen> with SingleTickerProvider
     );
   }
 
-  Widget _buildHeader(AdminProvider admin) {
-    final startFmt = _selectedDateRange != null 
-        ? intl.DateFormat('yyyy/MM/dd').format(_selectedDateRange!.start) : '-';
-    final endFmt = _selectedDateRange != null 
-        ? intl.DateFormat('yyyy/MM/dd').format(_selectedDateRange!.end) : '-';
-    
+  Widget _buildHeader() {
     return Container(
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Colors.white,
-        boxShadow: [BoxShadow(color: Colors.black.withAlpha(13), blurRadius: 10)],
+        color: AppTheme.surface,
+        border: Border(bottom: BorderSide(color: Colors.white.withAlpha(13))),
       ),
-      child: Row(
-        children: [
-          const Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('مركز التقارير', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Color(0xFF1E293B))),
-              Text('تحليلات شاملة لأداء العيادة', style: TextStyle(color: Colors.grey)),
-            ],
-          ),
-          const Spacer(),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final isMobile = constraints.maxWidth < 600;
           
-          // Date Range Picker
-          InkWell(
-            onTap: _pickDateRange,
-            borderRadius: BorderRadius.circular(12),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              decoration: BoxDecoration(
-                border: Border.all(color: Colors.grey.shade300),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
+          return Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              // العنوان
+              Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Icon(Icons.calendar_today, size: 18, color: Color(0xFF6C63FF)),
-                  const SizedBox(width: 10),
-                  Text('$startFmt - $endFmt', style: const TextStyle(fontWeight: FontWeight.w600)),
+                  const Icon(Icons.analytics, color: AppTheme.primary, size: 22),
                   const SizedBox(width: 8),
-                  const Icon(Icons.arrow_drop_down),
+                  Text(isMobile ? 'التقارير' : 'مركز التقارير', 
+                    style: TextStyle(fontSize: isMobile ? 16 : 18, fontWeight: FontWeight.bold)),
                 ],
               ),
+              
+              // الأزرار
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // البحث (للشاشات الكبيرة فقط)
+                  if (!isMobile)
+                    SizedBox(
+                      width: 180,
+                      height: 36,
+                      child: TextField(
+                        controller: _searchController,
+                        onChanged: (v) {
+                          setState(() => _searchQuery = v);
+                          _calculateStats();
+                        },
+                        decoration: InputDecoration(
+                          hintText: 'بحث...',
+                          hintStyle: const TextStyle(color: Colors.white38, fontSize: 12),
+                          prefixIcon: const Icon(Icons.search, color: Colors.white38, size: 18),
+                          filled: true,
+                          fillColor: AppTheme.background,
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
+                        ),
+                        style: const TextStyle(color: Colors.white, fontSize: 12),
+                      ),
+                    ),
+                  const SizedBox(width: 4),
+                  IconButton(
+                    onPressed: _loadData,
+                    icon: const Icon(Icons.refresh, color: Colors.white70, size: 20),
+                    tooltip: 'تحديث',
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                  ),
+                  const SizedBox(width: 4),
+                  ElevatedButton.icon(
+                    onPressed: _showExportDialog,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppTheme.primary,
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                      minimumSize: Size.zero,
+                    ),
+                    icon: const Icon(Icons.download, size: 16),
+                    label: Text(isMobile ? '' : 'تصدير', style: const TextStyle(fontSize: 12)),
+                  ),
+                ],
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildQuickFilters() {
+    final filters = [
+      {'key': 'today', 'label': 'اليوم', 'icon': Icons.today},
+      {'key': 'week', 'label': 'الأسبوع', 'icon': Icons.view_week},
+      {'key': 'month', 'label': 'الشهر', 'icon': Icons.calendar_month},
+      {'key': 'year', 'label': 'السنة', 'icon': Icons.calendar_today},
+      {'key': 'custom', 'label': 'مخصص', 'icon': Icons.date_range},
+    ];
+    
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      color: AppTheme.surface,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            const Text('الفترة: ', style: TextStyle(color: Colors.white70, fontSize: 11)),
+            const SizedBox(width: 4),
+            ...filters.map((f) => Padding(
+              padding: const EdgeInsets.only(left: 4),
+              child: _QuickFilterChip(
+                label: f['label'] as String,
+                icon: f['icon'] as IconData,
+                isSelected: _quickFilter == f['key'],
+                onTap: () {
+                  if (f['key'] == 'custom') {
+                    _pickCustomDateRange();
+                  } else {
+                    _setQuickFilter(f['key'] as String);
+                  }
+                },
+              ),
+            )),
+            const SizedBox(width: 8),
+            if (_dateRange != null)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: AppTheme.primary.withAlpha(26),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  '${intl.DateFormat('d/M').format(_dateRange!.start)} - ${intl.DateFormat('d/M').format(_dateRange!.end)}',
+                  style: const TextStyle(color: AppTheme.primary, fontSize: 10, fontWeight: FontWeight.w600),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAdvancedFilters() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      color: AppTheme.surface,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            // Doctor Filter
+            _FilterDropdown(
+              label: 'الطبيب',
+              value: _selectedDoctor,
+              items: [
+                const DropdownMenuItem(value: 'all', child: Text('الكل', style: TextStyle(fontSize: 11))),
+                ..._doctors.map((d) => DropdownMenuItem(
+                  value: d['id'].toString(),
+                  child: Text(d['name'] ?? '', style: const TextStyle(fontSize: 11)),
+                )),
+              ],
+              onChanged: (v) {
+                setState(() => _selectedDoctor = v ?? 'all');
+                _calculateStats();
+              },
             ),
-          ),
-          
-          const SizedBox(width: 12),
-          
-          // Refresh Button
-          IconButton(
-            onPressed: _refreshData,
-            icon: const Icon(Icons.refresh),
-            tooltip: 'تحديث',
-          ),
-          
-          // Export Button
-          ElevatedButton.icon(
-            onPressed: () => _showExportDialog(),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF6C63FF),
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+            const SizedBox(width: 8),
+            // Service Filter
+            _FilterDropdown(
+              label: 'الخدمة',
+              value: _selectedService,
+              items: [
+                const DropdownMenuItem(value: 'all', child: Text('الكل', style: TextStyle(fontSize: 11))),
+                ..._services.map((s) => DropdownMenuItem(
+                  value: s['id'].toString(),
+                  child: Text(s['name'] ?? '', style: const TextStyle(fontSize: 11)),
+                )),
+              ],
+              onChanged: (v) {
+                setState(() => _selectedService = v ?? 'all');
+                _calculateStats();
+              },
             ),
-            icon: const Icon(Icons.download, size: 18),
-            label: const Text('تصدير'),
-          ),
+            const SizedBox(width: 8),
+            // Status Filter
+            _FilterDropdown(
+              label: 'الحالة',
+              value: _selectedStatus,
+              items: const [
+                DropdownMenuItem(value: 'all', child: Text('الكل', style: TextStyle(fontSize: 11))),
+                DropdownMenuItem(value: 'completed', child: Text('مكتمل', style: TextStyle(fontSize: 11))),
+                DropdownMenuItem(value: 'arrived', child: Text('وصل', style: TextStyle(fontSize: 11))),
+                DropdownMenuItem(value: 'booked', child: Text('محجوز', style: TextStyle(fontSize: 11))),
+                DropdownMenuItem(value: 'cancelled', child: Text('ملغي', style: TextStyle(fontSize: 11))),
+              ],
+              onChanged: (v) {
+                setState(() => _selectedStatus = v ?? 'all');
+                _calculateStats();
+              },
+            ),
+            const SizedBox(width: 8),
+            // Clear Filters
+            if (_selectedDoctor != 'all' || _selectedService != 'all' || _selectedStatus != 'all' || _searchQuery.isNotEmpty)
+              IconButton(
+                onPressed: () {
+                  setState(() {
+                    _selectedDoctor = 'all';
+                    _selectedService = 'all';
+                    _selectedStatus = 'all';
+                    _selectedReception = 'all';
+                    _selectedCallCenter = 'all';
+                    _searchQuery = '';
+                    _searchController.clear();
+                  });
+                  _calculateStats();
+                },
+                icon: const Icon(Icons.clear_all, size: 18, color: Colors.white54),
+                tooltip: 'مسح الفلاتر',
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTabBar() {
+    return Container(
+      color: AppTheme.surface,
+      child: TabBar(
+        controller: _tabController,
+        labelColor: AppTheme.primary,
+        unselectedLabelColor: Colors.white54,
+        indicatorColor: AppTheme.primary,
+        tabs: const [
+          Tab(text: 'نظرة عامة', icon: Icon(Icons.dashboard, size: 18)),
+          Tab(text: 'المالية', icon: Icon(Icons.attach_money, size: 18)),
+          Tab(text: 'الأطباء', icon: Icon(Icons.medical_services, size: 18)),
+          Tab(text: 'الجلسات', icon: Icon(Icons.calendar_month, size: 18)),
+          Tab(text: 'المرضى', icon: Icon(Icons.people, size: 18)),
         ],
       ),
     );
   }
 
-  // ============ TAB 1: OVERVIEW ============
-  Widget _buildOverviewTab(AdminProvider admin) {
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TAB 1: OVERVIEW
+  // ═══════════════════════════════════════════════════════════════════════════
+  Widget _buildOverviewTab() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // KPI Cards Row
-          _buildKPICards(admin),
-          const SizedBox(height: 24),
-          
-          // Alerts
-          if (admin.pendingCancellations.isNotEmpty)
-            _buildAlertCard(admin),
-          
-          const SizedBox(height: 24),
-          
-          // Charts Row 1: Revenue + Status Pie
+          // KPI Cards
+          _buildKPICards(),
+          const SizedBox(height: 20),
+          // Charts Row
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Expanded(flex: 2, child: _buildRevenueChart(admin)),
+              Expanded(flex: 2, child: _buildRevenueChart()),
               const SizedBox(width: 20),
-              Expanded(child: _buildStatusPieChart(admin)),
+              Expanded(child: _buildStatusPieChart()),
             ],
           ),
-          
-          const SizedBox(height: 24),
-          
-          // Charts Row 2: Hourly Analysis + Top Doctors
+          const SizedBox(height: 20),
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Expanded(flex: 2, child: _buildHourlyAnalysisChart(admin)),
+              Expanded(flex: 2, child: _buildHourlyChart()),
               const SizedBox(width: 20),
-              Expanded(child: _buildTopDoctorsCard(admin)),
-            ],
-          ),
-          
-          const SizedBox(height: 24),
-          
-          // AI Insights
-          _buildInsightsCard(admin),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildKPICards(AdminProvider admin) {
-    final totalRev = admin.totalRevenue;
-    final totalSessions = admin.callCenterStats['total_bookings'] ?? 0;
-    final arrived = admin.callCenterStats['arrived'] ?? 0;
-    final cancelled = admin.callCenterStats['cancelled'] ?? 0;
-    final noShow = admin.callCenterStats['no_show'] ?? 0;
-    
-    return GridView.count(
-      crossAxisCount: 5,
-      shrinkWrap: true,
-      mainAxisSpacing: 16,
-      crossAxisSpacing: 16,
-      childAspectRatio: 1.8,
-      physics: const NeverScrollableScrollPhysics(),
-      children: [
-        _kpiCard('الإيراد الإجمالي', '${intl.NumberFormat("#,##0").format(totalRev)} د.ع', Icons.attach_money, Colors.green),
-        _kpiCard('إجمالي الحجوزات', '$totalSessions', Icons.calendar_month, Colors.blue),
-        _kpiCard('الحضور', '$arrived', Icons.check_circle, Colors.teal),
-        _kpiCard('الإلغاءات', '$cancelled', Icons.cancel, Colors.orange),
-        _kpiCard('عدم الحضور', '$noShow', Icons.person_off, Colors.red),
-      ],
-    );
-  }
-
-  Widget _kpiCard(String title, String value, IconData icon, Color color) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [BoxShadow(color: Colors.black.withAlpha(10), blurRadius: 10)],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(color: color.withAlpha(26), borderRadius: BorderRadius.circular(8)),
-                child: Icon(icon, color: color, size: 20),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Text(value, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-          Text(title, style: TextStyle(color: Colors.grey.shade600, fontSize: 13)),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildAlertCard(AdminProvider admin) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.red.shade50,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.red.shade200),
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.warning_amber, color: Colors.red),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              '${admin.pendingCancellations.length} طلب إلغاء معلق يتطلب موافقة',
-              style: const TextStyle(color: Colors.red, fontWeight: FontWeight.w600),
-            ),
-          ),
-          TextButton(
-            onPressed: () => _tabController.animateTo(4), // Go to Sessions tab
-            child: const Text('عرض'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildRevenueChart(AdminProvider admin) {
-    final dailyData = admin.dailyRevenueStats.entries.toList()
-      ..sort((a, b) => a.key.compareTo(b.key));
-
-    return Container(
-      height: 350,
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [BoxShadow(color: Colors.black.withAlpha(10), blurRadius: 10)],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('تحليل الإيرادات اليومية', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 20),
-          Expanded(
-            child: dailyData.isEmpty
-                ? const Center(child: Text('لا توجد بيانات'))
-                : LineChart(
-                    LineChartData(
-                      gridData: FlGridData(show: true, drawVerticalLine: false, 
-                        getDrawingHorizontalLine: (v) => FlLine(color: Colors.grey.shade200, strokeWidth: 1)),
-                      titlesData: FlTitlesData(
-                        rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                        topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                        bottomTitles: AxisTitles(
-                          sideTitles: SideTitles(
-                            showTitles: true,
-                            getTitlesWidget: (val, meta) {
-                              if (val.toInt() >= 0 && val.toInt() < dailyData.length && val.toInt() % 3 == 0) {
-                                return Padding(
-                                  padding: const EdgeInsets.only(top: 8),
-                                  child: Text(dailyData[val.toInt()].key, style: const TextStyle(fontSize: 10)),
-                                );
-                              }
-                              return const SizedBox.shrink();
-                            },
-                          ),
-                        ),
-                      ),
-                      borderData: FlBorderData(show: false),
-                      lineBarsData: [
-                        LineChartBarData(
-                          spots: dailyData.asMap().entries.map((e) => FlSpot(e.key.toDouble(), e.value.value)).toList(),
-                          isCurved: true,
-                          color: const Color(0xFF6C63FF),
-                          barWidth: 3,
-                          dotData: const FlDotData(show: false),
-                          belowBarData: BarAreaData(show: true, color: const Color(0xFF6C63FF).withAlpha(26)),
-                        ),
-                      ],
-                    ),
-                  ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildTopDoctorsCard(AdminProvider admin) {
-    final docs = admin.doctorPerformance.take(5).toList();
-    
-    return Container(
-      height: 350,
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [BoxShadow(color: Colors.black.withAlpha(10), blurRadius: 10)],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('أفضل الأطباء أداءً', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 16),
-          Expanded(
-            child: docs.isEmpty
-                ? const Center(child: Text('لا توجد بيانات'))
-                : ListView.separated(
-                    itemCount: docs.length,
-                    separatorBuilder: (_, __) => const Divider(),
-                    itemBuilder: (ctx, idx) {
-                      final doc = docs[idx];
-                      return ListTile(
-                        leading: CircleAvatar(
-                          backgroundColor: Colors.blue.shade100,
-                          child: Text('${idx + 1}', style: const TextStyle(fontWeight: FontWeight.bold)),
-                        ),
-                        title: Text(doc['name'] ?? ''),
-                        subtitle: Text('${doc['sessions']} جلسة'),
-                        trailing: Text(
-                          '${intl.NumberFormat("#,##0").format(doc['revenue'])}',
-                          style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green),
-                        ),
-                      );
-                    },
-                  ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildInsightsCard(AdminProvider admin) {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(colors: [Colors.amber.shade50, Colors.orange.shade50]),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.amber.shade200),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Row(
-            children: [
-              Icon(Icons.lightbulb, color: Colors.amber),
-              SizedBox(width: 8),
-              Text('رؤى ذكية', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-            ],
-          ),
-          const SizedBox(height: 12),
-          ...admin.smartInsights.map((insight) => Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Row(
-              children: [
-                const Icon(Icons.arrow_left, size: 16, color: Colors.amber),
-                const SizedBox(width: 8),
-                Expanded(child: Text(insight)),
-              ],
-            ),
-          )),
-          if (admin.smartInsights.isEmpty) const Text('لا توجد رؤى حالياً'),
-        ],
-      ),
-    );
-  }
-
-  // NEW: Session Status Pie Chart
-  Widget _buildStatusPieChart(AdminProvider admin) {
-    final stats = admin.callCenterStats;
-    final arrived = (stats['arrived'] ?? 0).toDouble();
-    final completed = (stats['completed'] ?? 0).toDouble();
-    final cancelled = (stats['cancelled'] ?? 0).toDouble();
-    final noShow = (stats['no_show'] ?? 0).toDouble();
-    final scheduled = (stats['scheduled'] ?? 0).toDouble();
-    
-    final total = arrived + completed + cancelled + noShow + scheduled;
-    
-    return Container(
-      height: 350,
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [BoxShadow(color: Colors.black.withAlpha(10), blurRadius: 10)],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('حالة الحجوزات', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 16),
-          Expanded(
-            child: total == 0
-                ? const Center(child: Text('لا توجد بيانات'))
-                : PieChart(
-                    PieChartData(
-                      sectionsSpace: 2,
-                      centerSpaceRadius: 40,
-                      sections: [
-                        if (completed > 0) PieChartSectionData(
-                          value: completed, title: '${(completed/total*100).toInt()}%',
-                          color: Colors.green, radius: 60,
-                          titleStyle: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
-                        ),
-                        if (arrived > 0) PieChartSectionData(
-                          value: arrived, title: '${(arrived/total*100).toInt()}%',
-                          color: Colors.blue, radius: 60,
-                          titleStyle: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
-                        ),
-                        if (scheduled > 0) PieChartSectionData(
-                          value: scheduled, title: '${(scheduled/total*100).toInt()}%',
-                          color: Colors.grey, radius: 60,
-                          titleStyle: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
-                        ),
-                        if (cancelled > 0) PieChartSectionData(
-                          value: cancelled, title: '${(cancelled/total*100).toInt()}%',
-                          color: Colors.orange, radius: 60,
-                          titleStyle: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
-                        ),
-                        if (noShow > 0) PieChartSectionData(
-                          value: noShow, title: '${(noShow/total*100).toInt()}%',
-                          color: Colors.red, radius: 60,
-                          titleStyle: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
-                        ),
-                      ],
-                    ),
-                  ),
-          ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 16,
-            runSpacing: 8,
-            children: [
-              _legendItem('مكتمل', Colors.green, completed.toInt()),
-              _legendItem('وصل', Colors.blue, arrived.toInt()),
-              _legendItem('مجدول', Colors.grey, scheduled.toInt()),
-              _legendItem('ملغي', Colors.orange, cancelled.toInt()),
-              _legendItem('لم يحضر', Colors.red, noShow.toInt()),
+              Expanded(child: _buildTopDoctorsCard()),
             ],
           ),
         ],
@@ -542,694 +568,683 @@ class _ReportsScreenState extends State<ReportsScreen> with SingleTickerProvider
     );
   }
 
-  Widget _legendItem(String label, Color color, int count) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(width: 12, height: 12, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
-        const SizedBox(width: 4),
-        Text('$label ($count)', style: const TextStyle(fontSize: 11)),
-      ],
+  Widget _buildKPICards() {
+    final cards = [
+      {'title': 'الإيراد', 'value': intl.NumberFormat("#,##0").format(_stats['totalRevenue'] ?? 0), 'icon': Icons.attach_money, 'color': Colors.green},
+      {'title': 'الجلسات', 'value': '${_stats['totalSessions'] ?? 0}', 'icon': Icons.calendar_month, 'color': Colors.blue},
+      {'title': 'مكتمل', 'value': '${_stats['completed'] ?? 0}', 'icon': Icons.check_circle, 'color': Colors.teal},
+      {'title': 'ملغي', 'value': '${_stats['cancelled'] ?? 0}', 'icon': Icons.cancel, 'color': Colors.orange},
+      {'title': 'نسبة', 'value': '${_stats['completionRate'] ?? 0}%', 'icon': Icons.trending_up, 'color': AppTheme.primary},
+    ];
+    
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isMobile = constraints.maxWidth < 600;
+        final crossAxisCount = isMobile ? 3 : 5;
+        final aspectRatio = isMobile ? 1.2 : 2.0;
+        
+        return GridView.count(
+          crossAxisCount: crossAxisCount,
+          shrinkWrap: true,
+          mainAxisSpacing: 8,
+          crossAxisSpacing: 8,
+          childAspectRatio: aspectRatio,
+          physics: const NeverScrollableScrollPhysics(),
+          children: cards.map((c) => _KPICard(
+            title: c['title'] as String,
+            value: c['value'] as String,
+            icon: c['icon'] as IconData,
+            color: c['color'] as Color,
+          )).toList(),
+        );
+      },
     );
   }
 
-  // NEW: Hourly Booking Analysis
-  Widget _buildHourlyAnalysisChart(AdminProvider admin) {
-    // Simulate hourly data (in production, this comes from admin.hourlyStats)
-    final hourlyData = <int, int>{};
-    for (int h = 10; h <= 22; h++) {
-      hourlyData[h] = (admin.callCenterStats['total_bookings'] ?? 0) ~/ 13 + (h % 3);
-    }
+  Widget _buildRevenueChart() {
+    final dailyData = _stats['dailyRevenue'] as Map<String, int>? ?? {};
+    final sortedData = dailyData.entries.toList()..sort((a, b) => a.key.compareTo(b.key));
     
-    final maxVal = hourlyData.values.isEmpty ? 1 : hourlyData.values.reduce((a, b) => a > b ? a : b);
-    
-    return Container(
-      height: 350,
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [BoxShadow(color: Colors.black.withAlpha(10), blurRadius: 10)],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Row(
-            children: [
-              Icon(Icons.access_time, size: 20, color: Color(0xFF6C63FF)),
-              SizedBox(width: 8),
-              Text('تحليل الحجوزات بالساعة', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-            ],
-          ),
-          const SizedBox(height: 8),
-          const Text('أفضل أوقات الحجز خلال اليوم', style: TextStyle(color: Colors.grey, fontSize: 12)),
-          const SizedBox(height: 20),
-          Expanded(
-            child: BarChart(
-              BarChartData(
-                alignment: BarChartAlignment.spaceAround,
-                barTouchData: BarTouchData(
-                  enabled: true,
-                  touchTooltipData: BarTouchTooltipData(
-                    getTooltipItem: (group, groupIndex, rod, rodIndex) {
-                      return BarTooltipItem(
-                        '${group.x}:00\n${rod.toY.toInt()} حجز',
-                        const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                      );
-                    },
-                  ),
-                ),
-                gridData: FlGridData(
-                  show: true,
-                  drawVerticalLine: false,
-                  getDrawingHorizontalLine: (v) => FlLine(color: Colors.grey.shade200, strokeWidth: 1),
-                ),
+    return _ChartCard(
+      title: 'الإيرادات اليومية',
+      height: 300,
+      child: sortedData.isEmpty
+          ? const Center(child: Text('لا توجد بيانات', style: TextStyle(color: Colors.white54)))
+          : LineChart(
+              LineChartData(
+                gridData: FlGridData(show: true, drawVerticalLine: false, getDrawingHorizontalLine: (v) => FlLine(color: Colors.white12)),
                 titlesData: FlTitlesData(
                   rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
                   topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
                   bottomTitles: AxisTitles(
                     sideTitles: SideTitles(
                       showTitles: true,
+                      reservedSize: 30,
                       getTitlesWidget: (val, meta) {
-                        return Padding(
-                          padding: const EdgeInsets.only(top: 8),
-                          child: Text('${val.toInt()}', style: const TextStyle(fontSize: 10)),
-                        );
+                        if (val.toInt() >= 0 && val.toInt() < sortedData.length && val.toInt() % 3 == 0) {
+                          return Padding(
+                            padding: const EdgeInsets.only(top: 8),
+                            child: Text(sortedData[val.toInt()].key, style: const TextStyle(fontSize: 10, color: Colors.white54)),
+                          );
+                        }
+                        return const SizedBox.shrink();
                       },
                     ),
                   ),
                   leftTitles: AxisTitles(
                     sideTitles: SideTitles(
                       showTitles: true,
-                      reservedSize: 30,
-                      getTitlesWidget: (val, meta) {
-                        if (val == val.roundToDouble()) {
-                          return Text('${val.toInt()}', style: const TextStyle(fontSize: 10));
-                        }
-                        return const SizedBox();
-                      },
+                      reservedSize: 50,
+                      getTitlesWidget: (val, meta) => Text('${(val / 1000).toStringAsFixed(0)}k', style: const TextStyle(fontSize: 10, color: Colors.white54)),
                     ),
                   ),
                 ),
                 borderData: FlBorderData(show: false),
-                barGroups: hourlyData.entries.map((e) {
-                  final isPeakHour = e.value == maxVal;
-                  return BarChartGroupData(
-                    x: e.key,
-                    barRods: [
-                      BarChartRodData(
-                        toY: e.value.toDouble(),
-                        color: isPeakHour ? Colors.green : const Color(0xFF6C63FF),
-                        width: 16,
-                        borderRadius: const BorderRadius.vertical(top: Radius.circular(4)),
-                      ),
-                    ],
-                  );
-                }).toList(),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ============ TAB 2: FINANCIAL ============
-  Widget _buildFinancialTab(AdminProvider admin) {
-    final services = admin.serviceFinancials;
-    final totalRev = admin.totalRevenue;
-    
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('التقارير المالية', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 20),
-          
-          // Financial Summary Cards
-          Row(
-            children: [
-              Expanded(child: _financeCard('الإيراد الإجمالي', totalRev, Icons.attach_money, Colors.green)),
-              const SizedBox(width: 16),
-              Expanded(child: _financeCard('متوسط الجلسة', totalRev > 0 ? totalRev / (admin.callCenterStats['total_bookings'] ?? 1) : 0, Icons.trending_up, Colors.blue)),
-              const SizedBox(width: 16),
-              Expanded(child: _financeCard('المستحقات', totalRev * 0.15, Icons.pending_actions, Colors.orange)),
-              const SizedBox(width: 16),
-              Expanded(child: _financeCard('المحصّل', totalRev * 0.85, Icons.check_circle, Colors.teal)),
-            ],
-          ),
-          
-          const SizedBox(height: 24),
-          
-          // Charts Row
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Revenue by Service
-              Expanded(
-                flex: 2,
-                child: Container(
-                  padding: const EdgeInsets.all(20),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('الإيرادات حسب الخدمة', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                      const SizedBox(height: 16),
-                      ...services.take(10).map((svc) {
-                        final percent = totalRev > 0 ? (svc['revenue'] / totalRev) : 0.0;
-                        return Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: Column(
-                            children: [
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                children: [
-                                  Expanded(child: Text(svc['name'] ?? '', overflow: TextOverflow.ellipsis)),
-                                  Text('${intl.NumberFormat("#,##0").format(svc['revenue'])} د.ع'),
-                                ],
-                              ),
-                              const SizedBox(height: 4),
-                              LinearProgressIndicator(
-                                value: percent.toDouble(),
-                                backgroundColor: Colors.grey.shade200,
-                                color: const Color(0xFF6C63FF),
-                              ),
-                            ],
-                          ),
-                        );
-                      }),
-                    ],
-                  ),
-                ),
-              ),
-              
-              const SizedBox(width: 20),
-              
-              // Payment Methods Breakdown
-              Expanded(
-                child: _buildPaymentMethodsChart(),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _financeCard(String title, num value, IconData icon, Color color) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withAlpha(51)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(icon, color: color, size: 20),
-              const Spacer(),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Text(
-            '${intl.NumberFormat("#,##0").format(value)} د.ع',
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: color),
-          ),
-          Text(title, style: TextStyle(color: Colors.grey.shade600, fontSize: 12)),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPaymentMethodsChart() {
-    // Simulated payment methods data
-    const cashPercent = 60.0;
-    const cardPercent = 25.0;
-    const transferPercent = 15.0;
-    
-    return Container(
-      height: 350,
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('طرق الدفع', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 16),
-          Expanded(
-            child: PieChart(
-              PieChartData(
-                sectionsSpace: 2,
-                centerSpaceRadius: 35,
-                sections: [
-                  PieChartSectionData(
-                    value: cashPercent, title: '${cashPercent.toInt()}%',
-                    color: Colors.green, radius: 50,
-                    titleStyle: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
-                  ),
-                  PieChartSectionData(
-                    value: cardPercent, title: '${cardPercent.toInt()}%',
-                    color: Colors.blue, radius: 50,
-                    titleStyle: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
-                  ),
-                  PieChartSectionData(
-                    value: transferPercent, title: '${transferPercent.toInt()}%',
-                    color: Colors.purple, radius: 50,
-                    titleStyle: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                lineBarsData: [
+                  LineChartBarData(
+                    spots: sortedData.asMap().entries.map((e) => FlSpot(e.key.toDouble(), e.value.value.toDouble())).toList(),
+                    isCurved: true,
+                    color: AppTheme.primary,
+                    barWidth: 3,
+                    dotData: const FlDotData(show: false),
+                    belowBarData: BarAreaData(show: true, color: AppTheme.primary.withAlpha(51)),
                   ),
                 ],
               ),
             ),
-          ),
-          const SizedBox(height: 12),
-          Column(
-            children: [
-              _paymentLegend('نقدي', Colors.green, cashPercent),
-              const SizedBox(height: 8),
-              _paymentLegend('بطاقة', Colors.blue, cardPercent),
-              const SizedBox(height: 8),
-              _paymentLegend('تحويل', Colors.purple, transferPercent),
-            ],
-          ),
-        ],
-      ),
     );
   }
 
-  Widget _paymentLegend(String label, Color color, double percent) {
-    return Row(
-      children: [
-        Container(width: 16, height: 16, decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(4))),
-        const SizedBox(width: 8),
-        Expanded(child: Text(label)),
-        Text('${percent.toInt()}%', style: const TextStyle(fontWeight: FontWeight.bold)),
-      ],
-    );
-  }
-
-  // ============ TAB 3: DOCTORS ============
-  Widget _buildDoctorsTab(AdminProvider admin) {
-    final docs = admin.doctorPerformance;
+  Widget _buildStatusPieChart() {
+    final completed = (_stats['completed'] ?? 0).toDouble();
+    final cancelled = (_stats['cancelled'] ?? 0).toDouble();
+    final noShow = (_stats['noShow'] ?? 0).toDouble();
+    final pending = (_stats['pending'] ?? 0).toDouble();
+    final total = completed + cancelled + noShow + pending;
     
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('أداء الأطباء', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 20),
-          
-          Container(
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: DataTable(
-              columns: const [
-                DataColumn(label: Text('الطبيب')),
-                DataColumn(label: Text('الجلسات')),
-                DataColumn(label: Text('الساعات')),
-                DataColumn(label: Text('الإيراد')),
-                DataColumn(label: Text('نسبة الاحتفاظ')),
+    return _ChartCard(
+      title: 'توزيع الحالات',
+      height: 300,
+      child: total == 0
+          ? const Center(child: Text('لا توجد بيانات', style: TextStyle(color: Colors.white54)))
+          : Column(
+              children: [
+                Expanded(
+                  child: PieChart(
+                    PieChartData(
+                      sectionsSpace: 2,
+                      centerSpaceRadius: 30,
+                      sections: [
+                        if (completed > 0) PieChartSectionData(value: completed, title: '', color: Colors.green, radius: 45),
+                        if (cancelled > 0) PieChartSectionData(value: cancelled, title: '', color: Colors.orange, radius: 45),
+                        if (noShow > 0) PieChartSectionData(value: noShow, title: '', color: Colors.red, radius: 45),
+                        if (pending > 0) PieChartSectionData(value: pending, title: '', color: Colors.grey, radius: 45),
+                      ],
+                    ),
+                  ),
+                ),
+                Wrap(
+                  spacing: 12,
+                  children: [
+                    _LegendItem(label: 'مكتمل', color: Colors.green, count: completed.toInt()),
+                    _LegendItem(label: 'ملغي', color: Colors.orange, count: cancelled.toInt()),
+                    _LegendItem(label: 'لم يحضر', color: Colors.red, count: noShow.toInt()),
+                    _LegendItem(label: 'محجوز', color: Colors.grey, count: pending.toInt()),
+                  ],
+                ),
               ],
-              rows: docs.map((doc) => DataRow(cells: [
-                DataCell(Text(doc['name'] ?? '')),
-                DataCell(Text('${doc['sessions']}')),
-                DataCell(Text('${doc['total_hours']} ساعة')),
-                DataCell(Text('${intl.NumberFormat("#,##0").format(doc['revenue'])} د.ع')),
-                DataCell(Text('${doc['retention_rate']}%')),
-              ])).toList(),
             ),
-          ),
-        ],
-      ),
     );
   }
 
-  // ============ TAB 4: PATIENTS ============
-  Widget _buildPatientsTab(AdminProvider admin) {
-    final stats = admin.patientStats;
+  Widget _buildHourlyChart() {
+    final hourlyData = _stats['hourlyBookings'] as Map<String, int>? ?? {};
+    
+    return _ChartCard(
+      title: 'الحجوزات بالساعة',
+      height: 300,
+      child: hourlyData.isEmpty
+          ? const Center(child: Text('لا توجد بيانات', style: TextStyle(color: Colors.white54)))
+          : BarChart(
+              BarChartData(
+                alignment: BarChartAlignment.spaceAround,
+                gridData: FlGridData(show: true, drawVerticalLine: false, getDrawingHorizontalLine: (v) => FlLine(color: Colors.white12)),
+                titlesData: FlTitlesData(
+                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      getTitlesWidget: (val, meta) => Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text('${val.toInt()}', style: const TextStyle(fontSize: 10, color: Colors.white54)),
+                      ),
+                    ),
+                  ),
+                ),
+                borderData: FlBorderData(show: false),
+                barGroups: hourlyData.entries.map((e) => BarChartGroupData(
+                  x: int.parse(e.key),
+                  barRods: [BarChartRodData(toY: e.value.toDouble(), color: AppTheme.primary, width: 14, borderRadius: const BorderRadius.vertical(top: Radius.circular(4)))],
+                )).toList(),
+              ),
+            ),
+    );
+  }
+
+  Widget _buildTopDoctorsCard() {
+    final docs = _stats['doctorStats'] as List<Map<String, dynamic>>? ?? [];
+    
+    return _ChartCard(
+      title: 'أفضل الأطباء',
+      height: 300,
+      child: docs.isEmpty
+          ? const Center(child: Text('لا توجد بيانات', style: TextStyle(color: Colors.white54)))
+          : ListView.separated(
+              shrinkWrap: true,
+              itemCount: docs.take(5).length,
+              separatorBuilder: (_, i) => Divider(color: Colors.white.withAlpha(26)),
+              itemBuilder: (ctx, idx) {
+                final doc = docs[idx];
+                return ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: CircleAvatar(
+                    radius: 16,
+                    backgroundColor: AppTheme.primary.withAlpha(51),
+                    child: Text('${idx + 1}', style: const TextStyle(color: AppTheme.primary, fontSize: 12, fontWeight: FontWeight.bold)),
+                  ),
+                  title: Text(doc['name'] ?? '', style: const TextStyle(color: Colors.white, fontSize: 13)),
+                  subtitle: Text('${doc['sessions']} جلسة', style: const TextStyle(color: Colors.white54, fontSize: 11)),
+                  trailing: Text('${intl.NumberFormat("#,##0").format(doc['revenue'])} د.ع', style: const TextStyle(color: Colors.green, fontSize: 12, fontWeight: FontWeight.bold)),
+                );
+              },
+            ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TAB 2: FINANCIAL
+  // ═══════════════════════════════════════════════════════════════════════════
+  Widget _buildFinancialTab() {
+    final serviceRev = _stats['serviceRevenue'] as List<MapEntry<String, int>>? ?? [];
     
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('تقارير المرضى', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 20),
-          
           // Summary Cards
           Row(
             children: [
-              Expanded(child: _kpiCard('إجمالي المرضى', '${stats['total_unique'] ?? 0}', Icons.people, Colors.blue)),
-              const SizedBox(width: 16),
-              Expanded(child: _kpiCard('ذكور', '${stats['male'] ?? 0}', Icons.male, Colors.indigo)),
-              const SizedBox(width: 16),
-              Expanded(child: _kpiCard('إناث', '${stats['female'] ?? 0}', Icons.female, Colors.pink)),
-              const SizedBox(width: 16),
-              Expanded(child: _kpiCard('نسبة العودة', '${stats['returning_rate'] ?? 0}%', Icons.repeat, Colors.green)),
+              Expanded(child: _FinanceCard(title: 'الإيراد الإجمالي', value: _stats['totalRevenue'] ?? 0, icon: Icons.attach_money, color: Colors.green)),
+              const SizedBox(width: 12),
+              Expanded(child: _FinanceCard(title: 'متوسط الجلسة', value: _stats['avgSession'] ?? 0, icon: Icons.trending_up, color: Colors.blue)),
+              const SizedBox(width: 12),
+              Expanded(child: _FinanceCard(title: 'إيراد اليوم', value: _stats['todayRevenue'] ?? 0, icon: Icons.today, color: Colors.teal)),
+              const SizedBox(width: 12),
+              Expanded(child: _FinanceCard(title: 'الجلسات المكتملة', value: _stats['completed'] ?? 0, icon: Icons.check_circle, color: AppTheme.primary, isCurrency: false)),
             ],
           ),
-          
-          const SizedBox(height: 24),
-          
-          // Charts Row
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Age Distribution
-              Expanded(
-                flex: 2,
-                child: _buildAgeDistributionChart(),
-              ),
-              const SizedBox(width: 20),
-              // Patient Source
-              Expanded(
-                child: _buildPatientSourceChart(),
-              ),
-            ],
+          const SizedBox(height: 20),
+          // Service Revenue
+          _ChartCard(
+            title: 'الإيرادات حسب الخدمة',
+            height: 400,
+            child: serviceRev.isEmpty
+                ? const Center(child: Text('لا توجد بيانات', style: TextStyle(color: Colors.white54)))
+                : ListView.builder(
+                    itemCount: serviceRev.length,
+                    itemBuilder: (ctx, idx) {
+                      final svc = serviceRev[idx];
+                      final max = serviceRev.first.value;
+                      final percent = max > 0 ? svc.value / max : 0.0;
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Expanded(child: Text(svc.key, style: const TextStyle(color: Colors.white, fontSize: 13), overflow: TextOverflow.ellipsis)),
+                                Text('${intl.NumberFormat("#,##0").format(svc.value)} د.ع', style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            LinearProgressIndicator(
+                              value: percent,
+                              backgroundColor: Colors.white12,
+                              color: AppTheme.primary,
+                              minHeight: 6,
+                              borderRadius: BorderRadius.circular(3),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildAgeDistributionChart() {
-    // Simulated age distribution
-    final ageGroups = {'18-25': 15, '26-35': 35, '36-45': 25, '46-55': 15, '56+': 10};
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TAB 3: DOCTORS
+  // ═══════════════════════════════════════════════════════════════════════════
+  Widget _buildDoctorsTab() {
+    final docs = _stats['doctorStats'] as List<Map<String, dynamic>>? ?? [];
     
-    return Container(
-      height: 350,
+    return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Row(
-            children: [
-              Icon(Icons.bar_chart, size: 20, color: Color(0xFF6C63FF)),
-              SizedBox(width: 8),
-              Text('توزيع الأعمار', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-            ],
-          ),
-          const SizedBox(height: 16),
-          Expanded(
-            child: BarChart(
-              BarChartData(
-                alignment: BarChartAlignment.spaceAround,
-                gridData: FlGridData(
-                  show: true,
-                  drawVerticalLine: false,
-                  getDrawingHorizontalLine: (v) => FlLine(color: Colors.grey.shade200, strokeWidth: 1),
-                ),
-                titlesData: FlTitlesData(
-                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                  bottomTitles: AxisTitles(
-                    sideTitles: SideTitles(
-                      showTitles: true,
-                      getTitlesWidget: (val, meta) {
-                        final keys = ageGroups.keys.toList();
-                        if (val.toInt() >= 0 && val.toInt() < keys.length) {
-                          return Padding(
-                            padding: const EdgeInsets.only(top: 8),
-                            child: Text(keys[val.toInt()], style: const TextStyle(fontSize: 11)),
-                          );
-                        }
-                        return const SizedBox();
-                      },
-                    ),
-                  ),
-                  leftTitles: AxisTitles(
-                    sideTitles: SideTitles(
-                      showTitles: true,
-                      reservedSize: 30,
-                      getTitlesWidget: (val, meta) {
-                        return Text('${val.toInt()}%', style: const TextStyle(fontSize: 10));
-                      },
-                    ),
-                  ),
-                ),
-                borderData: FlBorderData(show: false),
-                barGroups: ageGroups.entries.toList().asMap().entries.map((e) {
-                  return BarChartGroupData(
-                    x: e.key,
-                    barRods: [
-                      BarChartRodData(
-                        toY: e.value.value.toDouble(),
-                        gradient: const LinearGradient(
-                          colors: [Color(0xFF6C63FF), Color(0xFF00E5FF)],
-                          begin: Alignment.bottomCenter,
-                          end: Alignment.topCenter,
-                        ),
-                        width: 32,
-                        borderRadius: const BorderRadius.vertical(top: Radius.circular(6)),
+      child: _ChartCard(
+        title: 'أداء الأطباء',
+        height: 600,
+        child: docs.isEmpty
+            ? const Center(child: Text('لا توجد بيانات', style: TextStyle(color: Colors.white54)))
+            : DataTable(
+                columnSpacing: 30,
+                headingRowColor: WidgetStateProperty.all(AppTheme.primary.withAlpha(26)),
+                columns: const [
+                  DataColumn(label: Text('#', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('الطبيب', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('الجلسات', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), numeric: true),
+                  DataColumn(label: Text('مكتمل', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), numeric: true),
+                  DataColumn(label: Text('ملغي', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), numeric: true),
+                  DataColumn(label: Text('الإيراد', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), numeric: true),
+                  DataColumn(label: Text('نسبة الإكمال', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), numeric: true),
+                ],
+                rows: docs.asMap().entries.map((e) {
+                  final doc = e.value;
+                  final sessions = doc['sessions'] ?? 0;
+                  final completed = doc['completed'] ?? 0;
+                  final rate = sessions > 0 ? (completed / sessions * 100).toStringAsFixed(1) : '0';
+                  return DataRow(cells: [
+                    DataCell(Text('${e.key + 1}', style: const TextStyle(color: Colors.white70))),
+                    DataCell(Text(doc['name'] ?? '', style: const TextStyle(color: Colors.white))),
+                    DataCell(Text('$sessions', style: const TextStyle(color: Colors.white70))),
+                    DataCell(Text('$completed', style: const TextStyle(color: Colors.green))),
+                    DataCell(Text('${doc['cancelled'] ?? 0}', style: const TextStyle(color: Colors.orange))),
+                    DataCell(Text('${intl.NumberFormat("#,##0").format(doc['revenue'])} د.ع', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))),
+                    DataCell(Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: double.parse(rate) >= 80 ? Colors.green.withAlpha(51) : Colors.orange.withAlpha(51),
+                        borderRadius: BorderRadius.circular(12),
                       ),
-                    ],
-                  );
+                      child: Text('$rate%', style: TextStyle(color: double.parse(rate) >= 80 ? Colors.green : Colors.orange, fontSize: 12)),
+                    )),
+                  ]);
                 }).toList(),
               ),
-            ),
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TAB 4: SESSIONS
+  // ═══════════════════════════════════════════════════════════════════════════
+  Widget _buildSessionsTab() {
+    final sessions = _stats['filteredSessions'] as List<Map<String, dynamic>>? ?? [];
+    
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('${sessions.length} جلسة', style: const TextStyle(color: Colors.white70, fontSize: 14)),
+          const SizedBox(height: 12),
+          _ChartCard(
+            title: 'قائمة الجلسات',
+            height: 600,
+            child: sessions.isEmpty
+                ? const Center(child: Text('لا توجد جلسات', style: TextStyle(color: Colors.white54)))
+                : ListView.builder(
+                    itemCount: sessions.length,
+                    itemBuilder: (ctx, idx) {
+                      final s = sessions[idx];
+                      final status = s['status'] ?? '';
+                      final statusColor = status == 'completed' ? Colors.green : status == 'cancelled' ? Colors.orange : status == 'no_show' ? Colors.red : Colors.grey;
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: AppTheme.background,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: statusColor.withAlpha(77)),
+                        ),
+                        child: Row(
+                          children: [
+                            Container(width: 4, height: 40, decoration: BoxDecoration(color: statusColor, borderRadius: BorderRadius.circular(2))),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(s['patients']?['name'] ?? 'غير محدد', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+                                  Text(s['services']?['name'] ?? '', style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                                ],
+                              ),
+                            ),
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              children: [
+                                Text('${intl.NumberFormat("#,##0").format(s['price'] ?? 0)} د.ع', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                                Text(s['start_time'] != null ? intl.DateFormat('yyyy/MM/dd - HH:mm').format(DateTime.parse(s['start_time'])) : '', style: const TextStyle(color: Colors.white38, fontSize: 11)),
+                              ],
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildPatientSourceChart() {
-    return Container(
-      height: 350,
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TAB 5: PATIENTS
+  // ═══════════════════════════════════════════════════════════════════════════
+  Widget _buildPatientsTab() {
+    // Patient analysis
+    Map<String, int> patientVisits = {};
+    Map<String, int> patientSpending = {};
+    Map<String, String> patientNames = {};
+    
+    for (var s in _sessions) {
+      final pid = s['patient_id']?.toString() ?? '';
+      if (pid.isNotEmpty) {
+        patientVisits[pid] = (patientVisits[pid] ?? 0) + 1;
+        patientNames[pid] = s['patients']?['name'] ?? 'غير محدد';
+        if (s['status'] == 'completed') {
+          patientSpending[pid] = (patientSpending[pid] ?? 0) + ((s['price'] ?? 0) as int);
+        }
+      }
+    }
+    
+    final vip = patientVisits.entries.where((e) => e.value >= 5).length;
+    final regular = patientVisits.entries.where((e) => e.value >= 2 && e.value < 5).length;
+    final oneTime = patientVisits.entries.where((e) => e.value == 1).length;
+    
+    var topPatients = patientSpending.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    
+    return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-      ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('مصادر المرضى', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 16),
-          Expanded(
-            child: PieChart(
-              PieChartData(
-                sectionsSpace: 2,
-                centerSpaceRadius: 30,
-                sections: [
-                  PieChartSectionData(value: 40, title: '40%', color: Colors.blue, radius: 50, 
-                    titleStyle: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
-                  PieChartSectionData(value: 25, title: '25%', color: Colors.green, radius: 50,
-                    titleStyle: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
-                  PieChartSectionData(value: 20, title: '20%', color: Colors.orange, radius: 50,
-                    titleStyle: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
-                  PieChartSectionData(value: 15, title: '15%', color: Colors.purple, radius: 50,
-                    titleStyle: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 12,
-            runSpacing: 8,
+          // Summary
+          Row(
             children: [
-              _legendItem('حضور مباشر', Colors.blue, 40),
-              _legendItem('سوشال ميديا', Colors.green, 25),
-              _legendItem('إحالة', Colors.orange, 20),
-              _legendItem('كول سنتر', Colors.purple, 15),
+              Expanded(child: _KPICard(title: 'إجمالي المرضى', value: '${_patients.length}', icon: Icons.people, color: Colors.blue)),
+              const SizedBox(width: 12),
+              Expanded(child: _KPICard(title: 'VIP (+5 زيارات)', value: '$vip', icon: Icons.star, color: Colors.amber)),
+              const SizedBox(width: 12),
+              Expanded(child: _KPICard(title: 'عادي (2-4)', value: '$regular', icon: Icons.person, color: Colors.teal)),
+              const SizedBox(width: 12),
+              Expanded(child: _KPICard(title: 'جديد (1)', value: '$oneTime', icon: Icons.person_add, color: Colors.grey)),
             ],
           ),
-        ],
-      ),
-    );
-  }
-
-  // ============ TAB 5: SESSIONS ============
-  Widget _buildSessionsTab(AdminProvider admin) {
-    final pending = admin.pendingCancellations;
-    final usage = admin.serviceUsageStats;
-    
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('تقارير الجلسات', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
           const SizedBox(height: 20),
-          
-          // Pending Cancellations
-          if (pending.isNotEmpty) ...[
-            const Text('طلبات الإلغاء المعلقة', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 12),
-            Container(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: ListView.separated(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                itemCount: pending.length,
-                separatorBuilder: (_, __) => const Divider(),
-                itemBuilder: (ctx, idx) {
-                  final b = pending[idx];
-                  return ListTile(
-                    title: Text(b['patient']?['name'] ?? 'غير معروف'),
-                    subtitle: Text(b['cancel_reason'] ?? 'بدون سبب'),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          icon: const Icon(Icons.check, color: Colors.green),
-                          onPressed: () async {
-                            await admin.approveCancellation(b['id']);
-                            if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تمت الموافقة')));
-                          },
+          // Top Patients
+          _ChartCard(
+            title: 'أفضل المرضى إنفاقاً',
+            height: 400,
+            child: topPatients.isEmpty
+                ? const Center(child: Text('لا توجد بيانات', style: TextStyle(color: Colors.white54)))
+                : ListView.builder(
+                    itemCount: topPatients.take(10).length,
+                    itemBuilder: (ctx, idx) {
+                      final p = topPatients[idx];
+                      return ListTile(
+                        leading: CircleAvatar(
+                          radius: 18,
+                          backgroundColor: idx < 3 ? Colors.amber.withAlpha(51) : AppTheme.primary.withAlpha(51),
+                          child: Text('${idx + 1}', style: TextStyle(color: idx < 3 ? Colors.amber : AppTheme.primary, fontSize: 12, fontWeight: FontWeight.bold)),
                         ),
-                        IconButton(
-                          icon: const Icon(Icons.close, color: Colors.red),
-                          onPressed: () async {
-                            await admin.rejectCancellation(b['id']);
-                            if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم الرفض')));
-                          },
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              ),
-            ),
-            const SizedBox(height: 24),
-          ],
-          
-          // Service Usage
-          const Text('استخدام الخدمات', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 12),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Column(
-              children: usage.entries.map((e) => Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(e.key),
-                    Chip(label: Text('${e.value} جلسة')),
-                  ],
-                ),
-              )).toList(),
-            ),
+                        title: Text(patientNames[p.key] ?? '', style: const TextStyle(color: Colors.white)),
+                        subtitle: Text('${patientVisits[p.key] ?? 0} زيارة', style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                        trailing: Text('${intl.NumberFormat("#,##0").format(p.value)} د.ع', style: const TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
+                      );
+                    },
+                  ),
           ),
         ],
       ),
     );
   }
 
-  // ============ TAB 6: DEVICES ============
-  Widget _buildDevicesTab(AdminProvider admin) {
-    final devices = admin.deviceStats;
-    
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('تقارير الأجهزة', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 20),
-          
-          GridView.builder(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: 3,
-              crossAxisSpacing: 16,
-              mainAxisSpacing: 16,
-              childAspectRatio: 2,
-            ),
-            itemCount: devices.length,
-            itemBuilder: (ctx, idx) {
-              final d = devices[idx];
-              return Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Row(
-                      children: [
-                        const Icon(Icons.precision_manufacturing, color: Color(0xFF6C63FF)),
-                        const SizedBox(width: 8),
-                        Text(d['name'] ?? '', style: const TextStyle(fontWeight: FontWeight.bold)),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Text('${d['usage']} استخدام', style: TextStyle(color: Colors.grey.shade600)),
-                  ],
-                ),
-              );
-            },
-          ),
-        ],
-      ),
+  // ═══════════════════════════════════════════════════════════════════════════
+  // DIALOGS
+  // ═══════════════════════════════════════════════════════════════════════════
+  Future<void> _pickCustomDateRange() async {
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(2023),
+      lastDate: DateTime(2030),
+      initialDateRange: _dateRange,
+      locale: const Locale('ar'),
     );
+    if (picked != null) {
+      setState(() {
+        _quickFilter = 'custom';
+        _dateRange = picked;
+      });
+      _loadData();
+    }
   }
 
   void _showExportDialog() {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('تصدير التقارير'),
-        content: Column(
+        backgroundColor: AppTheme.surface,
+        title: const Text('تصدير التقرير', style: TextStyle(color: Colors.white)),
+        content: const Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            ListTile(
-              leading: const Icon(Icons.picture_as_pdf, color: Colors.red),
-              title: const Text('تصدير PDF'),
-              onTap: () {
-                Navigator.pop(ctx);
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('جاري تحضير ملف PDF...')));
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.table_chart, color: Colors.green),
-              title: const Text('تصدير Excel'),
-              onTap: () {
-                Navigator.pop(ctx);
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('جاري تحضير ملف Excel...')));
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.print, color: Colors.blue),
-              title: const Text('طباعة'),
-              onTap: () {
-                Navigator.pop(ctx);
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('جاري إعداد الطباعة...')));
-              },
-            ),
+            ListTile(leading: Icon(Icons.picture_as_pdf, color: Colors.red), title: Text('PDF', style: TextStyle(color: Colors.white))),
+            ListTile(leading: Icon(Icons.table_chart, color: Colors.green), title: Text('Excel', style: TextStyle(color: Colors.white))),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إغلاق')),
+        ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WIDGETS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+class _QuickFilterChip extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool isSelected;
+  final VoidCallback onTap;
+  
+  const _QuickFilterChip({required this.label, required this.icon, required this.isSelected, required this.onTap});
+  
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: isSelected ? AppTheme.primary : AppTheme.background,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: isSelected ? AppTheme.primary : Colors.white24),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 14, color: isSelected ? Colors.white : Colors.white54),
+            const SizedBox(width: 6),
+            Text(label, style: TextStyle(fontSize: 12, color: isSelected ? Colors.white : Colors.white54)),
           ],
         ),
       ),
+    );
+  }
+}
+
+class _FilterDropdown extends StatelessWidget {
+  final String label;
+  final String value;
+  final List<DropdownMenuItem<String>> items;
+  final Function(String?) onChanged;
+  
+  const _FilterDropdown({required this.label, required this.value, required this.items, required this.onChanged});
+  
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text('$label: ', style: const TextStyle(color: Colors.white54, fontSize: 12)),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          decoration: BoxDecoration(color: AppTheme.background, borderRadius: BorderRadius.circular(8)),
+          child: DropdownButton<String>(
+            value: value,
+            items: items,
+            onChanged: onChanged,
+            dropdownColor: AppTheme.surface,
+            underline: const SizedBox(),
+            style: const TextStyle(color: Colors.white, fontSize: 13),
+            icon: const Icon(Icons.arrow_drop_down, color: Colors.white54),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _KPICard extends StatelessWidget {
+  final String title;
+  final String value;
+  final IconData icon;
+  final Color color;
+  
+  const _KPICard({required this.title, required this.value, required this.icon, required this.color});
+  
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: AppTheme.surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withAlpha(51)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: color, size: 14),
+          const Spacer(),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: AlignmentDirectional.centerStart,
+            child: Text(value, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.white)),
+          ),
+          Flexible(
+            child: Text(title, style: const TextStyle(color: Colors.white54, fontSize: 8), overflow: TextOverflow.ellipsis, maxLines: 1),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FinanceCard extends StatelessWidget {
+  final String title;
+  final int value;
+  final IconData icon;
+  final Color color;
+  final bool isCurrency;
+  
+  const _FinanceCard({required this.title, required this.value, required this.icon, required this.color, this.isCurrency = true});
+  
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: AppTheme.surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withAlpha(51)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: color, size: 16),
+          const SizedBox(height: 4),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(
+              isCurrency ? intl.NumberFormat("#,##0").format(value) : '$value',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: color),
+            ),
+          ),
+          Text(title, style: const TextStyle(color: Colors.white54, fontSize: 9), overflow: TextOverflow.ellipsis),
+        ],
+      ),
+    );
+  }
+}
+
+class _ChartCard extends StatelessWidget {
+  final String title;
+  final double height;
+  final Widget child;
+  
+  const _ChartCard({required this.title, required this.height, required this.child});
+  
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: height,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppTheme.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withAlpha(13)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.white)),
+          const SizedBox(height: 16),
+          Expanded(child: child),
+        ],
+      ),
+    );
+  }
+}
+
+class _LegendItem extends StatelessWidget {
+  final String label;
+  final Color color;
+  final int count;
+  
+  const _LegendItem({required this.label, required this.color, required this.count});
+  
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(width: 10, height: 10, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+        const SizedBox(width: 4),
+        Text('$label ($count)', style: const TextStyle(fontSize: 11, color: Colors.white54)),
+      ],
     );
   }
 }
